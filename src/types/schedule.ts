@@ -1,6 +1,7 @@
 export interface Staff {
   id: string;
   name: string;
+  monthlyHours?: number; // Bireysel aylık mesai saati (yıllık izin vs. için)
   unavailableDates: DateRange[];
   preferTogether: string[]; // staff IDs
   preferNotTogether: string[]; // staff IDs

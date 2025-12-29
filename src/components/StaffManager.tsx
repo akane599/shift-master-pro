@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { UserPlus, X, Users, Calendar, UserMinus, UserCheck } from 'lucide-react';
+import { UserPlus, X, Users, Calendar, UserMinus, UserCheck, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 import { tr } from 'date-fns/locale';
 import { Calendar as CalendarComponent } from '@/components/ui/calendar';
@@ -15,15 +15,23 @@ import { cn } from '@/lib/utils';
 interface StaffManagerProps {
   staff: Staff[];
   onStaffChange: (staff: Staff[]) => void;
+  defaultMonthlyHours: number;
 }
 
-export function StaffManager({ staff, onStaffChange }: StaffManagerProps) {
+export function StaffManager({ staff, onStaffChange, defaultMonthlyHours }: StaffManagerProps) {
   const [newName, setNewName] = useState('');
   const [selectedStaffId, setSelectedStaffId] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<{ start: Date | undefined; end: Date | undefined }>({
     start: undefined,
     end: undefined
   });
+
+  const updateStaffMonthlyHours = (staffId: string, hours: number | undefined) => {
+    onStaffChange(staff.map(s => {
+      if (s.id !== staffId) return s;
+      return { ...s, monthlyHours: hours };
+    }));
+  };
 
   const addStaff = () => {
     if (!newName.trim()) return;
@@ -162,7 +170,12 @@ export function StaffManager({ staff, onStaffChange }: StaffManagerProps) {
                     </div>
                     <div>
                       <span className="font-medium">{s.name}</span>
-                      <div className="flex gap-1 mt-1">
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {s.monthlyHours !== undefined && s.monthlyHours < defaultMonthlyHours && (
+                          <Badge variant="outline" className="text-xs bg-warning/20 text-warning border-warning/50">
+                            {s.monthlyHours}h
+                          </Badge>
+                        )}
                         {s.unavailableDates.length > 0 && (
                           <Badge variant="outline" className="text-xs">
                             {s.unavailableDates.length} izin
@@ -208,6 +221,44 @@ export function StaffManager({ staff, onStaffChange }: StaffManagerProps) {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Individual monthly hours */}
+            <div>
+              <h4 className="font-medium mb-2 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-primary" />
+                Aylık Mesai Saati
+              </h4>
+              <p className="text-xs text-muted-foreground mb-2">
+                Yıllık izin gibi durumlarda kişiye özel mesai saati belirleyebilirsiniz.
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  placeholder={`Varsayılan: ${defaultMonthlyHours}`}
+                  value={selectedStaff.monthlyHours ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value ? parseInt(e.target.value) : undefined;
+                    updateStaffMonthlyHours(selectedStaff.id, value);
+                  }}
+                  className="w-32"
+                />
+                {selectedStaff.monthlyHours !== undefined && (
+                  <Button 
+                    variant="ghost" 
+                    size="sm"
+                    onClick={() => updateStaffMonthlyHours(selectedStaff.id, undefined)}
+                  >
+                    Sıfırla
+                  </Button>
+                )}
+                <span className="text-sm text-muted-foreground">saat</span>
+              </div>
+              {selectedStaff.monthlyHours !== undefined && selectedStaff.monthlyHours < defaultMonthlyHours && (
+                <Badge variant="outline" className="mt-2 text-xs bg-warning/20 text-warning border-warning/50">
+                  {defaultMonthlyHours - selectedStaff.monthlyHours} saat az çalışacak
+                </Badge>
+              )}
+            </div>
+
             {/* Unavailable dates */}
             <div>
               <h4 className="font-medium mb-2 flex items-center gap-2">

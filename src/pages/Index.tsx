@@ -157,7 +157,7 @@ export default function Index() {
 
           <TabsContent value="staff" className="animate-fade-in">
             <div className="max-w-2xl mx-auto">
-              <StaffManager staff={staff} onStaffChange={setStaff} />
+              <StaffManager staff={staff} onStaffChange={setStaff} defaultMonthlyHours={config.totalMonthlyHours} />
             </div>
           </TabsContent>
 

@@ -39,8 +39,8 @@ export function generateSchedule(
   const daysInMonth = getDaysInMonth(new Date(config.year, config.month));
   const monthStart = startOfMonth(new Date(config.year, config.month));
   
-  // Calculate target hours per person
-  const targetHoursPerPerson = config.totalMonthlyHours / staff.length;
+  // Calculate target hours per person (use individual hours if set, otherwise use default)
+  const getTargetHours = (s: Staff) => s.monthlyHours ?? config.totalMonthlyHours;
   
   // Track hours per staff
   const staffHours: Map<string, number> = new Map();
@@ -61,7 +61,7 @@ export function generateSchedule(
           availableStaff,
           staff,
           staffHours,
-          targetHoursPerPerson,
+          config.totalMonthlyHours,
           config.minStaffPerShift
         );
         
@@ -89,7 +89,7 @@ export function generateSchedule(
       availableStaff,
       staff,
       staffHours,
-      targetHoursPerPerson,
+      config.totalMonthlyHours,
       config.minStaffPerShift
     );
     
@@ -129,14 +129,18 @@ function selectStaffForShift(
   availableStaff: Staff[],
   allStaff: Staff[],
   staffHours: Map<string, number>,
-  targetHours: number,
+  defaultTargetHours: number,
   minStaff: number
 ): Staff[] {
-  // Sort by hours worked (ascending) to prioritize those with fewer hours
+  // Sort by percentage of target hours completed (ascending) to prioritize those with more room
   const sortedStaff = [...availableStaff].sort((a, b) => {
     const hoursA = staffHours.get(a.id) || 0;
     const hoursB = staffHours.get(b.id) || 0;
-    return hoursA - hoursB;
+    const targetA = a.monthlyHours ?? defaultTargetHours;
+    const targetB = b.monthlyHours ?? defaultTargetHours;
+    const percentA = targetA > 0 ? hoursA / targetA : 1;
+    const percentB = targetB > 0 ? hoursB / targetB : 1;
+    return percentA - percentB;
   });
   
   const selected: Staff[] = [];

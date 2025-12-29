@@ -199,26 +199,37 @@ export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) 
                 </tr>
               </thead>
               <tbody>
-                {result.staffStats.map(stat => (
-                  <tr key={stat.staffId} className="border-b border-border/50">
-                    <td className="py-2 px-2 font-medium">{stat.name}</td>
-                    <td className="text-center py-2 px-2 font-mono">{stat.totalHours}</td>
-                    <td className="text-center py-2 px-2">{stat.shiftCount}</td>
-                    <td className="text-center py-2 px-2">{stat.shift24Count}</td>
-                    <td className="text-center py-2 px-2">{stat.shift16Count}</td>
-                    <td className="text-center py-2 px-2">
-                      {stat.preferencesTotal > 0 ? (
-                        <span className={cn(
-                          stat.preferencesSatisfied / stat.preferencesTotal >= 0.5 
-                            ? "text-success" 
-                            : "text-warning"
-                        )}>
-                          {stat.preferencesSatisfied}/{stat.preferencesTotal}
-                        </span>
-                      ) : '-'}
-                    </td>
-                  </tr>
-                ))}
+                {result.staffStats.map(stat => {
+                  const staffMember = staff.find(s => s.id === stat.staffId);
+                  const targetHours = staffMember?.monthlyHours;
+                  return (
+                    <tr key={stat.staffId} className="border-b border-border/50">
+                      <td className="py-2 px-2 font-medium">
+                        {stat.name}
+                        {targetHours !== undefined && (
+                          <Badge variant="outline" className="ml-2 text-xs bg-warning/20 text-warning border-warning/50">
+                            Hedef: {targetHours}h
+                          </Badge>
+                        )}
+                      </td>
+                      <td className="text-center py-2 px-2 font-mono">{stat.totalHours}</td>
+                      <td className="text-center py-2 px-2">{stat.shiftCount}</td>
+                      <td className="text-center py-2 px-2">{stat.shift24Count}</td>
+                      <td className="text-center py-2 px-2">{stat.shift16Count}</td>
+                      <td className="text-center py-2 px-2">
+                        {stat.preferencesTotal > 0 ? (
+                          <span className={cn(
+                            stat.preferencesSatisfied / stat.preferencesTotal >= 0.5 
+                              ? "text-success" 
+                              : "text-warning"
+                          )}>
+                            {stat.preferencesSatisfied}/{stat.preferencesTotal}
+                          </span>
+                        ) : '-'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
