@@ -1,16 +1,21 @@
 import { Staff, Shift, ScheduleConfig, ScheduleResult, StaffStats, DateRange } from '@/types/schedule';
 import { addDays, isSameDay, isWithinInterval, getDaysInMonth, startOfMonth, format } from 'date-fns';
 
-function isDateUnavailable(date: Date, unavailableDates: DateRange[]): boolean {
-  return unavailableDates.some(range => 
+function isDateUnavailable(date: Date, unavailableDates: DateRange[], vacationDays: Date[]): boolean {
+  // Check unavailable date ranges
+  const inRange = unavailableDates.some(range => 
     isWithinInterval(date, { start: range.start, end: range.end })
   );
+  if (inRange) return true;
+  
+  // Check vacation days
+  return vacationDays.some(vd => isSameDay(date, vd));
 }
 
 function getAvailableStaff(date: Date, staff: Staff[], assignedYesterday: Set<string>): Staff[] {
   return staff.filter(s => {
-    // Check if staff is unavailable on this date
-    if (isDateUnavailable(date, s.unavailableDates)) return false;
+    // Check if staff is unavailable on this date (including vacation days)
+    if (isDateUnavailable(date, s.unavailableDates, s.vacationDays || [])) return false;
     // Check if staff worked yesterday (post-shift rule)
     if (assignedYesterday.has(s.id)) return false;
     return true;
@@ -23,12 +28,18 @@ function calculateStaffHours(staffId: string, shifts: Shift[]): number {
     .reduce((total, s) => total + s.duration, 0);
 }
 
-function checkPreferTogether(staff1: Staff, staff2: Staff): boolean {
-  return staff1.preferTogether.includes(staff2.id) || staff2.preferTogether.includes(staff1.id);
+function checkPreferTogether(staff1: Staff, staff2: Staff): { preferred: boolean; strict: boolean } {
+  const preferred = staff1.preferTogether.includes(staff2.id) || staff2.preferTogether.includes(staff1.id);
+  const strict = (staff1.preferTogether.includes(staff2.id) && staff1.preferTogetherStrict) ||
+                 (staff2.preferTogether.includes(staff1.id) && staff2.preferTogetherStrict);
+  return { preferred, strict };
 }
 
-function checkPreferNotTogether(staff1: Staff, staff2: Staff): boolean {
-  return staff1.preferNotTogether.includes(staff2.id) || staff2.preferNotTogether.includes(staff1.id);
+function checkPreferNotTogether(staff1: Staff, staff2: Staff): { preferred: boolean; strict: boolean } {
+  const preferred = staff1.preferNotTogether.includes(staff2.id) || staff2.preferNotTogether.includes(staff1.id);
+  const strict = (staff1.preferNotTogether.includes(staff2.id) && staff1.preferNotTogetherStrict) ||
+                 (staff2.preferNotTogether.includes(staff1.id) && staff2.preferNotTogetherStrict);
+  return { preferred, strict };
 }
 
 export function generateSchedule(
@@ -149,25 +160,39 @@ function selectStaffForShift(
   for (const s of sortedStaff) {
     if (selected.length >= minStaff) break;
     
-    // Check if this person conflicts with already selected
-    const hasConflict = selected.some(sel => checkPreferNotTogether(s, sel));
+    // Check if this person conflicts with already selected (strict = always block, non-strict = block)
+    const hasConflict = selected.some(sel => {
+      const notTogether = checkPreferNotTogether(s, sel);
+      return notTogether.preferred; // Both strict and non-strict block selection
+    });
     if (hasConflict) continue;
     
     selected.push(s);
   }
   
-  // Try to honor "prefer together" preferences (60-70% of the time)
-  if (Math.random() < 0.65) {
-    for (const s of selected) {
-      const preferredPartners = sortedStaff.filter(
-        candidate => 
-          !selected.includes(candidate) && 
-          checkPreferTogether(s, candidate) &&
-          !selected.some(sel => checkPreferNotTogether(candidate, sel))
-      );
+  // Handle "prefer together" preferences
+  for (const s of selected) {
+    const preferredPartners = sortedStaff.filter(candidate => {
+      if (selected.includes(candidate)) return false;
       
-      if (preferredPartners.length > 0 && selected.length < minStaff + 1) {
-        selected.push(preferredPartners[0]);
+      const together = checkPreferTogether(s, candidate);
+      if (!together.preferred) return false;
+      
+      // Check conflicts with already selected
+      const hasConflict = selected.some(sel => checkPreferNotTogether(candidate, sel).preferred);
+      if (hasConflict) return false;
+      
+      return true;
+    });
+    
+    for (const partner of preferredPartners) {
+      const together = checkPreferTogether(s, partner);
+      
+      // If strict, always add; if not strict, 60-70% chance
+      if (together.strict || Math.random() < 0.65) {
+        if (selected.length < minStaff + 1) {
+          selected.push(partner);
+        }
       }
     }
   }

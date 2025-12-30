@@ -33,10 +33,15 @@ export default function Index() {
           // Convert date strings back to Date objects
           const loadedStaff = data.staff.map((s: any) => ({
             ...s,
-            unavailableDates: s.unavailableDates.map((d: any) => ({
+            vacationDays: (s.vacationDays || []).map((d: string) => new Date(d)),
+            unavailableDates: (s.unavailableDates || []).map((d: any) => ({
               start: new Date(d.start),
               end: new Date(d.end)
-            }))
+            })),
+            preferTogether: s.preferTogether || [],
+            preferNotTogether: s.preferNotTogether || [],
+            preferTogetherStrict: s.preferTogetherStrict || false,
+            preferNotTogetherStrict: s.preferNotTogetherStrict || false
           }));
           setStaff(loadedStaff);
         }
