@@ -1,21 +1,28 @@
-import { ScheduleResult, Staff } from '@/types/schedule';
+import { useState } from 'react';
+import { ScheduleResult, Staff, Shift } from '@/types/schedule';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { format, startOfMonth, getDaysInMonth, addDays, getDay } from 'date-fns';
 import { tr } from 'date-fns/locale';
-import { CalendarDays, AlertTriangle, CheckCircle, TrendingUp, Lightbulb } from 'lucide-react';
+import { CalendarDays, AlertTriangle, CheckCircle, TrendingUp, Lightbulb, Edit3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ShiftEditDialog } from './ShiftEditDialog';
+import { toast } from '@/hooks/use-toast';
 
 interface ScheduleViewProps {
   result: ScheduleResult | null;
   staff: Staff[];
   month: number;
   year: number;
+  onResultChange?: (result: ScheduleResult) => void;
 }
 
 const dayNames = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 
-export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) {
+export function ScheduleView({ result, staff, month, year, onResultChange }: ScheduleViewProps) {
+  const [editingShift, setEditingShift] = useState<Shift | null>(null);
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
+
   if (!result) {
     return (
       <Card className="glass-card">
@@ -56,6 +63,72 @@ export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) 
     if (score < 10) return 'text-success';
     if (score < 20) return 'text-warning';
     return 'text-destructive';
+  };
+
+  const handleShiftClick = (shift: Shift) => {
+    setEditingShift(shift);
+    setIsDialogOpen(true);
+  };
+
+  const handleShiftSave = (updatedShift: Shift) => {
+    if (!result || !onResultChange) return;
+
+    // Update the shift in the result
+    const updatedShifts = result.shifts.map(s => 
+      format(s.date, 'yyyy-MM-dd') === format(updatedShift.date, 'yyyy-MM-dd')
+        ? updatedShift
+        : s
+    );
+
+    // Recalculate stats
+    const staffStats = staff.map(s => {
+      const staffShifts = updatedShifts.filter(shift => shift.staffIds.includes(s.id));
+      const totalHours = staffShifts.reduce((sum, shift) => sum + shift.duration, 0);
+      const shift24Count = staffShifts.filter(shift => shift.duration === 24).length;
+      const shift16Count = staffShifts.filter(shift => shift.duration === 16).length;
+      
+      let preferencesSatisfied = 0;
+      let preferencesTotal = 0;
+      
+      staffShifts.forEach(shift => {
+        s.preferTogether.forEach(partnerId => {
+          preferencesTotal++;
+          if (shift.staffIds.includes(partnerId)) {
+            preferencesSatisfied++;
+          }
+        });
+      });
+      
+      return {
+        staffId: s.id,
+        name: s.name,
+        totalHours,
+        shiftCount: staffShifts.length,
+        shift24Count,
+        shift16Count,
+        preferencesSatisfied,
+        preferencesTotal
+      };
+    });
+
+    // Recalculate inequality score
+    const hours = staffStats.map(s => s.totalHours);
+    const mean = hours.reduce((a, b) => a + b, 0) / hours.length;
+    const variance = hours.reduce((sum, h) => sum + Math.pow(h - mean, 2), 0) / hours.length;
+    const stdDev = Math.sqrt(variance);
+    const inequalityScore = mean > 0 ? (stdDev / mean) * 100 : 0;
+
+    onResultChange({
+      ...result,
+      shifts: updatedShifts,
+      staffStats,
+      inequalityScore
+    });
+
+    toast({
+      title: 'Nöbet Güncellendi',
+      description: `${format(updatedShift.date, 'd MMMM', { locale: tr })} nöbeti başarıyla değiştirildi.`
+    });
   };
 
   return (
@@ -149,10 +222,12 @@ export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) 
               return (
                 <div
                   key={idx}
+                  onClick={() => shift && handleShiftClick(shift)}
                   className={cn(
-                    "aspect-square p-1 rounded-lg border transition-all",
+                    "aspect-square p-1 rounded-lg border transition-all group relative",
                     shift ? (shift.duration === 24 ? "shift-24 border-primary/30" : "shift-16 border-accent/30") : "bg-card border-border",
-                    isWeekend && "bg-muted/30"
+                    isWeekend && "bg-muted/30",
+                    shift && "cursor-pointer hover:ring-2 hover:ring-primary/50"
                   )}
                 >
                   <div className="h-full flex flex-col">
@@ -163,14 +238,19 @@ export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) 
                       {format(date, 'd')}
                     </span>
                     {shift && (
-                      <div className="flex-1 flex flex-col justify-center overflow-hidden">
-                        <span className="text-[10px] font-mono text-center">
-                          {shift.duration}s
-                        </span>
-                        <div className="text-[9px] text-center truncate">
-                          {shift.staffIds.map(id => getStaffName(id).split(' ')[0]).join(', ')}
+                      <>
+                        <div className="flex-1 flex flex-col justify-center overflow-hidden">
+                          <span className="text-[10px] font-mono text-center">
+                            {shift.duration}s
+                          </span>
+                          <div className="text-[9px] text-center truncate">
+                            {shift.staffIds.map(id => getStaffName(id).split(' ')[0]).join(', ')}
+                          </div>
                         </div>
-                      </div>
+                        <div className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Edit3 className="w-3 h-3 text-primary" />
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>
@@ -255,6 +335,15 @@ export function ScheduleView({ result, staff, month, year }: ScheduleViewProps) 
           </ul>
         </CardContent>
       </Card>
+
+      {/* Shift Edit Dialog */}
+      <ShiftEditDialog
+        shift={editingShift}
+        staff={staff}
+        open={isDialogOpen}
+        onOpenChange={setIsDialogOpen}
+        onSave={handleShiftSave}
+      />
     </div>
   );
 }

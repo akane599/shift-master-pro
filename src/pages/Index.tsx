@@ -80,6 +80,10 @@ export default function Index() {
     });
   };
 
+  const handleUpdateResult = (newResult: ScheduleResult) => {
+    setResult(newResult);
+  };
+
   const handleExportExcel = () => {
     if (!result) return;
     exportToExcel(result, staff, config.month, config.year);
@@ -179,6 +183,7 @@ export default function Index() {
                 staff={staff}
                 month={config.month}
                 year={config.year}
+                onResultChange={handleUpdateResult}
               />
               
               {/* Mobile export buttons */}
@@ -210,7 +215,8 @@ export default function Index() {
       {/* Footer */}
       <footer className="border-t border-border mt-auto py-4">
         <div className="container mx-auto px-4 text-center text-xs text-muted-foreground">
-          Hastane Nöbet Planlayıcı • Veriler tarayıcıda saklanır
+          <p>Hastane Nöbet Planlayıcı • Veriler tarayıcıda saklanır</p>
+          <p className="mt-1 opacity-50">Made by Tuğberk Özgen</p>
         </div>
       </footer>
     </div>
