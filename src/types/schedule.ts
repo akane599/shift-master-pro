@@ -2,9 +2,12 @@ export interface Staff {
   id: string;
   name: string;
   monthlyHours?: number; // Bireysel aylık mesai saati (yıllık izin vs. için)
+  vacationDays: Date[]; // Yıllık izin günleri
   unavailableDates: DateRange[];
   preferTogether: string[]; // staff IDs
   preferNotTogether: string[]; // staff IDs
+  preferTogetherStrict: boolean; // %100 birlikte olma zorunluluğu
+  preferNotTogetherStrict: boolean; // %100 ayrı olma zorunluluğu
 }
 
 export interface DateRange {
