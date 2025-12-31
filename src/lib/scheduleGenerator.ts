@@ -42,6 +42,15 @@ function checkPreferNotTogether(staff1: Staff, staff2: Staff): { preferred: bool
   return { preferred, strict };
 }
 
+function getTargetHours(s: Staff, defaultHours: number): number {
+  return s.monthlyHours ?? defaultHours;
+}
+
+function getRemainingHours(s: Staff, currentHours: number, defaultTargetHours: number): number {
+  const target = getTargetHours(s, defaultTargetHours);
+  return Math.max(0, target - currentHours);
+}
+
 export function generateSchedule(
   staff: Staff[],
   config: ScheduleConfig
@@ -50,9 +59,6 @@ export function generateSchedule(
   const daysInMonth = getDaysInMonth(new Date(config.year, config.month));
   const monthStart = startOfMonth(new Date(config.year, config.month));
   
-  // Calculate target hours per person (use individual hours if set, otherwise use default)
-  const getTargetHours = (s: Staff) => s.monthlyHours ?? config.totalMonthlyHours;
-  
   // Track hours per staff
   const staffHours: Map<string, number> = new Map();
   staff.forEach(s => staffHours.set(s.id, 0));
@@ -60,32 +66,66 @@ export function generateSchedule(
   // Track who worked yesterday
   let assignedYesterday: Set<string> = new Set();
   
-  // Process each day of the month
+  // First pass: Assign 24-hour shifts to fill most of the hours
   for (let day = 0; day < daysInMonth; day++) {
     const currentDate = addDays(monthStart, day);
     const availableStaff = getAvailableStaff(currentDate, staff, assignedYesterday);
     
-    if (availableStaff.length < config.minStaffPerShift) {
-      // Not enough staff, skip or assign whoever is available
-      if (availableStaff.length > 0) {
+    // Filter to staff who still need hours
+    const staffNeedingHours = availableStaff.filter(s => {
+      const current = staffHours.get(s.id) || 0;
+      const target = getTargetHours(s, config.totalMonthlyHours);
+      return current + 24 <= target; // Can fit a 24-hour shift
+    });
+    
+    if (staffNeedingHours.length < config.minStaffPerShift) {
+      // Try with staff who can at least fit a 16-hour shift
+      const staffFor16 = availableStaff.filter(s => {
+        const current = staffHours.get(s.id) || 0;
+        const target = getTargetHours(s, config.totalMonthlyHours);
+        return current + 16 <= target;
+      });
+      
+      if (staffFor16.length >= config.minStaffPerShift) {
         const selectedStaff = selectStaffForShift(
-          availableStaff,
+          staffFor16,
           staff,
           staffHours,
           config.totalMonthlyHours,
           config.minStaffPerShift
         );
         
-        const duration = 24; // Prefer 24-hour shifts
         shifts.push({
           date: currentDate,
           staffIds: selectedStaff.map(s => s.id),
-          duration
+          duration: 24
         });
         
         selectedStaff.forEach(s => {
           const currentHours = staffHours.get(s.id) || 0;
-          staffHours.set(s.id, currentHours + duration);
+          staffHours.set(s.id, currentHours + 24);
+        });
+        
+        assignedYesterday = new Set(selectedStaff.map(s => s.id));
+      } else if (availableStaff.length > 0) {
+        // Assign whoever is available with appropriate duration
+        const selectedStaff = selectStaffForShift(
+          availableStaff,
+          staff,
+          staffHours,
+          config.totalMonthlyHours,
+          Math.min(config.minStaffPerShift, availableStaff.length)
+        );
+        
+        shifts.push({
+          date: currentDate,
+          staffIds: selectedStaff.map(s => s.id),
+          duration: 24
+        });
+        
+        selectedStaff.forEach(s => {
+          const currentHours = staffHours.get(s.id) || 0;
+          staffHours.set(s.id, currentHours + 24);
         });
         
         assignedYesterday = new Set(selectedStaff.map(s => s.id));
@@ -95,38 +135,174 @@ export function generateSchedule(
       continue;
     }
     
-    // Select staff for this shift
+    // Select staff for this shift (prefer 3 people for better coverage)
+    const targetStaffCount = Math.max(config.minStaffPerShift, 3);
     const selectedStaff = selectStaffForShift(
-      availableStaff,
+      staffNeedingHours,
       staff,
       staffHours,
       config.totalMonthlyHours,
-      config.minStaffPerShift
+      targetStaffCount
     );
-    
-    // Determine shift duration (prefer 24)
-    const duration = 24;
     
     shifts.push({
       date: currentDate,
       staffIds: selectedStaff.map(s => s.id),
-      duration
+      duration: 24
     });
     
     // Update hours
     selectedStaff.forEach(s => {
       const currentHours = staffHours.get(s.id) || 0;
-      staffHours.set(s.id, currentHours + duration);
+      staffHours.set(s.id, currentHours + 24);
     });
     
     // Update yesterday's staff
     assignedYesterday = new Set(selectedStaff.map(s => s.id));
   }
   
+  // Second pass: Add 16-hour shifts to reach exact target hours
+  // Check who needs more hours to reach their target
+  const hoursDeficit: { staffId: string; deficit: number; staff: Staff }[] = [];
+  staff.forEach(s => {
+    const current = staffHours.get(s.id) || 0;
+    const target = getTargetHours(s, config.totalMonthlyHours);
+    const deficit = target - current;
+    if (deficit > 0) {
+      hoursDeficit.push({ staffId: s.id, deficit, staff: s });
+    }
+  });
+  
+  // Sort by deficit (largest first)
+  hoursDeficit.sort((a, b) => b.deficit - a.deficit);
+  
+  // Try to add 16-hour shifts to days where we have only 2 people (to make it 3)
+  for (const { staffId, deficit, staff: targetStaff } of hoursDeficit) {
+    if (deficit < 16) continue; // Can't fit even one 16-hour shift
+    
+    let shiftsToAdd = Math.floor(deficit / 16);
+    
+    for (let day = 0; day < daysInMonth && shiftsToAdd > 0; day++) {
+      const currentDate = addDays(monthStart, day);
+      const existingShift = shifts.find(s => isSameDay(s.date, currentDate));
+      
+      if (!existingShift) continue;
+      
+      // Check if this person is already on this shift
+      if (existingShift.staffIds.includes(staffId)) continue;
+      
+      // Check if person is available on this date
+      if (isDateUnavailable(currentDate, targetStaff.unavailableDates, targetStaff.vacationDays || [])) continue;
+      
+      // Check post-shift rule (didn't work yesterday)
+      const yesterday = addDays(currentDate, -1);
+      const yesterdayShift = shifts.find(s => isSameDay(s.date, yesterday));
+      if (yesterdayShift && yesterdayShift.staffIds.includes(staffId)) continue;
+      
+      // Check prefer-not-together conflicts
+      const hasConflict = existingShift.staffIds.some(otherId => {
+        const other = staff.find(s => s.id === otherId);
+        if (!other) return false;
+        return checkPreferNotTogether(targetStaff, other).preferred;
+      });
+      if (hasConflict) continue;
+      
+      // Prefer days with only 2 people to boost to 3
+      if (existingShift.staffIds.length === 2) {
+        // Add a 16-hour shift for this person
+        const shift16Index = shifts.findIndex(s => 
+          isSameDay(s.date, currentDate) && s.duration === 16 && s.staffIds.includes(staffId)
+        );
+        
+        if (shift16Index === -1) {
+          shifts.push({
+            date: currentDate,
+            staffIds: [staffId],
+            duration: 16
+          });
+          
+          staffHours.set(staffId, (staffHours.get(staffId) || 0) + 16);
+          shiftsToAdd--;
+        }
+      }
+    }
+    
+    // Second priority: any day where person can work
+    for (let day = 0; day < daysInMonth && shiftsToAdd > 0; day++) {
+      const currentDate = addDays(monthStart, day);
+      
+      // Check if person is available on this date
+      if (isDateUnavailable(currentDate, targetStaff.unavailableDates, targetStaff.vacationDays || [])) continue;
+      
+      // Check if already has a shift (16 or 24) on this day
+      const alreadyOnShift = shifts.some(s => 
+        isSameDay(s.date, currentDate) && s.staffIds.includes(staffId)
+      );
+      if (alreadyOnShift) continue;
+      
+      // Check post-shift rule
+      const yesterday = addDays(currentDate, -1);
+      const yesterdayShift = shifts.find(s => isSameDay(s.date, yesterday));
+      if (yesterdayShift && yesterdayShift.staffIds.includes(staffId)) continue;
+      
+      // Check tomorrow rule (if we add today, can't work tomorrow)
+      const tomorrow = addDays(currentDate, 1);
+      const tomorrowShift = shifts.find(s => isSameDay(s.date, tomorrow));
+      if (tomorrowShift && tomorrowShift.staffIds.includes(staffId)) {
+        // Would conflict with tomorrow's shift
+        continue;
+      }
+      
+      // Add 16-hour shift
+      shifts.push({
+        date: currentDate,
+        staffIds: [staffId],
+        duration: 16
+      });
+      
+      staffHours.set(staffId, (staffHours.get(staffId) || 0) + 16);
+      shiftsToAdd--;
+    }
+  }
+  
+  // Third pass: Check for any remaining deficit and try to fill with more creative solutions
+  staff.forEach(s => {
+    const current = staffHours.get(s.id) || 0;
+    const target = getTargetHours(s, config.totalMonthlyHours);
+    const deficit = target - current;
+    
+    if (deficit >= 16) {
+      // Still need hours - try harder
+      for (let day = daysInMonth - 1; day >= 0 && deficit >= 16; day--) {
+        const currentDate = addDays(monthStart, day);
+        
+        if (isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || [])) continue;
+        
+        const alreadyOnShift = shifts.some(shift => 
+          isSameDay(shift.date, currentDate) && shift.staffIds.includes(s.id)
+        );
+        if (alreadyOnShift) continue;
+        
+        const yesterday = addDays(currentDate, -1);
+        const yesterdayShifts = shifts.filter(shift => isSameDay(shift.date, yesterday));
+        const workedYesterday = yesterdayShifts.some(shift => shift.staffIds.includes(s.id));
+        if (workedYesterday) continue;
+        
+        shifts.push({
+          date: currentDate,
+          staffIds: [s.id],
+          duration: 16
+        });
+        
+        staffHours.set(s.id, (staffHours.get(s.id) || 0) + 16);
+      }
+    }
+  });
+  
   // Calculate statistics
   const staffStats = calculateStats(staff, shifts);
-  const inequalityScore = calculateInequalityScore(staffStats);
-  const suggestions = generateSuggestions(staffStats, inequalityScore, staff);
+  const inequalityScore = calculateInequalityScore(staffStats, staff, config.totalMonthlyHours);
+  const suggestions = generateSuggestions(staffStats, inequalityScore, staff, config.totalMonthlyHours);
   
   return {
     shifts,
@@ -141,29 +317,30 @@ function selectStaffForShift(
   allStaff: Staff[],
   staffHours: Map<string, number>,
   defaultTargetHours: number,
-  minStaff: number
+  targetCount: number
 ): Staff[] {
-  // Sort by percentage of target hours completed (ascending) to prioritize those with more room
+  // Sort by remaining hours needed (descending) - prioritize those who need more hours
   const sortedStaff = [...availableStaff].sort((a, b) => {
-    const hoursA = staffHours.get(a.id) || 0;
-    const hoursB = staffHours.get(b.id) || 0;
-    const targetA = a.monthlyHours ?? defaultTargetHours;
-    const targetB = b.monthlyHours ?? defaultTargetHours;
-    const percentA = targetA > 0 ? hoursA / targetA : 1;
-    const percentB = targetB > 0 ? hoursB / targetB : 1;
-    return percentA - percentB;
+    const remainingA = getRemainingHours(a, staffHours.get(a.id) || 0, defaultTargetHours);
+    const remainingB = getRemainingHours(b, staffHours.get(b.id) || 0, defaultTargetHours);
+    return remainingB - remainingA; // Higher remaining = higher priority
   });
   
   const selected: Staff[] = [];
   
-  // First, add staff with lowest hours
+  // First, add staff with most remaining hours
   for (const s of sortedStaff) {
-    if (selected.length >= minStaff) break;
+    if (selected.length >= targetCount) break;
     
-    // Check if this person conflicts with already selected (strict = always block, non-strict = block)
+    // Skip if already at or over target
+    const current = staffHours.get(s.id) || 0;
+    const target = getTargetHours(s, defaultTargetHours);
+    if (current >= target) continue;
+    
+    // Check if this person conflicts with already selected
     const hasConflict = selected.some(sel => {
       const notTogether = checkPreferNotTogether(s, sel);
-      return notTogether.preferred; // Both strict and non-strict block selection
+      return notTogether.preferred;
     });
     if (hasConflict) continue;
     
@@ -171,7 +348,9 @@ function selectStaffForShift(
   }
   
   // Handle "prefer together" preferences
-  for (const s of selected) {
+  for (const s of [...selected]) {
+    if (selected.length >= targetCount) break;
+    
     const preferredPartners = sortedStaff.filter(candidate => {
       if (selected.includes(candidate)) return false;
       
@@ -182,22 +361,27 @@ function selectStaffForShift(
       const hasConflict = selected.some(sel => checkPreferNotTogether(candidate, sel).preferred);
       if (hasConflict) return false;
       
+      // Check if candidate still needs hours
+      const current = staffHours.get(candidate.id) || 0;
+      const target = getTargetHours(candidate, defaultTargetHours);
+      if (current >= target) return false;
+      
       return true;
     });
     
     for (const partner of preferredPartners) {
+      if (selected.length >= targetCount) break;
+      
       const together = checkPreferTogether(s, partner);
       
       // If strict, always add; if not strict, 60-70% chance
       if (together.strict || Math.random() < 0.65) {
-        if (selected.length < minStaff + 1) {
-          selected.push(partner);
-        }
+        selected.push(partner);
       }
     }
   }
   
-  return selected.slice(0, Math.max(minStaff, selected.length));
+  return selected.slice(0, targetCount);
 }
 
 function calculateStats(staff: Staff[], shifts: Shift[]): StaffStats[] {
@@ -233,33 +417,43 @@ function calculateStats(staff: Staff[], shifts: Shift[]): StaffStats[] {
   });
 }
 
-function calculateInequalityScore(stats: StaffStats[]): number {
+function calculateInequalityScore(stats: StaffStats[], staff: Staff[], defaultTargetHours: number): number {
   if (stats.length === 0) return 0;
   
-  const hours = stats.map(s => s.totalHours);
-  const mean = hours.reduce((a, b) => a + b, 0) / hours.length;
-  const variance = hours.reduce((sum, h) => sum + Math.pow(h - mean, 2), 0) / hours.length;
-  const stdDev = Math.sqrt(variance);
+  // Calculate based on deviation from individual targets, not just mean
+  const deviations = stats.map(s => {
+    const staffMember = staff.find(st => st.id === s.staffId);
+    const target = staffMember?.monthlyHours ?? defaultTargetHours;
+    return Math.abs(s.totalHours - target);
+  });
   
-  // Return coefficient of variation as percentage
-  return mean > 0 ? (stdDev / mean) * 100 : 0;
+  const avgDeviation = deviations.reduce((a, b) => a + b, 0) / deviations.length;
+  const maxDeviation = Math.max(...deviations);
+  
+  // Return weighted score (lower is better)
+  return (avgDeviation * 0.5 + maxDeviation * 0.5);
 }
 
-function generateSuggestions(stats: StaffStats[], score: number, staff: Staff[]): string[] {
+function generateSuggestions(stats: StaffStats[], score: number, staff: Staff[], defaultTargetHours: number): string[] {
   const suggestions: string[] = [];
   
-  if (score > 15) {
+  // Check if anyone is significantly off their target
+  stats.forEach(s => {
+    const staffMember = staff.find(st => st.id === s.staffId);
+    const target = staffMember?.monthlyHours ?? defaultTargetHours;
+    const diff = Math.abs(s.totalHours - target);
+    
+    if (diff > 24) {
+      if (s.totalHours > target) {
+        suggestions.push(`${s.name} hedef saatinden ${s.totalHours - target} saat fazla çalışıyor.`);
+      } else {
+        suggestions.push(`${s.name} hedef saatine ${target - s.totalHours} saat eksik. Daha fazla müsait gün eklenebilir.`);
+      }
+    }
+  });
+  
+  if (score > 20) {
     suggestions.push("Eşitsizlik skoru yüksek. Bazı kişilerin müsaitlik kısıtlamalarını gevşetmeyi düşünün.");
-  }
-  
-  const maxHours = Math.max(...stats.map(s => s.totalHours));
-  const minHours = Math.min(...stats.map(s => s.totalHours));
-  const diff = maxHours - minHours;
-  
-  if (diff > 48) {
-    const maxPerson = stats.find(s => s.totalHours === maxHours);
-    const minPerson = stats.find(s => s.totalHours === minHours);
-    suggestions.push(`${maxPerson?.name} ile ${minPerson?.name} arasında ${diff} saat fark var. Manuel ayarlama yapabilirsiniz.`);
   }
   
   // Check preference satisfaction
@@ -268,8 +462,14 @@ function generateSuggestions(stats: StaffStats[], score: number, staff: Staff[])
     suggestions.push(`${lowSatisfaction.map(s => s.name).join(', ')} için birlikte çalışma tercihleri düşük oranda karşılandı.`);
   }
   
+  // Check for days with only 2 people
+  const shift24Only = staff.length >= 3;
+  if (shift24Only) {
+    suggestions.push("3 kişilik nöbet hedeflenmiştir. 2 kişilik günlere 16 saatlik ek nöbetler atandı.");
+  }
+  
   if (suggestions.length === 0) {
-    suggestions.push("Dağılım dengeli görünüyor. İyi bir çizelge oluşturuldu!");
+    suggestions.push("Dağılım dengeli görünüyor. Hedef saatler tutturuldu!");
   }
   
   return suggestions;
