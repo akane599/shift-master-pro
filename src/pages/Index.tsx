@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { format } from 'date-fns';
 import { Staff, ScheduleConfig, ScheduleResult } from '@/types/schedule';
 import { StaffManager } from '@/components/StaffManager';
 import { ScheduleConfig as ScheduleConfigComponent } from '@/components/ScheduleConfig';
@@ -11,6 +12,12 @@ import { Calendar, Users, Settings, FileSpreadsheet, FileText, Sparkles, Stethos
 import { toast } from '@/hooks/use-toast';
 
 const STORAGE_KEY = 'hospital-shift-scheduler-data';
+
+const toDateOnly = (d: Date) => format(d, 'yyyy-MM-dd');
+const fromDateOnly = (value: string) => {
+  const [y, m, day] = value.split('-').map(Number);
+  return new Date(y, m - 1, day);
+};
 
 export default function Index() {
   const [staff, setStaff] = useState<Staff[]>([]);
@@ -30,13 +37,15 @@ export default function Index() {
       try {
         const data = JSON.parse(saved);
         if (data.staff) {
-          // Convert date strings back to Date objects
+          // Convert stored date-only strings back to Date objects (avoid timezone shifts)
           const loadedStaff = data.staff.map((s: any) => ({
             ...s,
-            vacationDays: (s.vacationDays || []).map((d: string) => new Date(d)),
+            vacationDays: (s.vacationDays || []).map((d: string) =>
+              typeof d === 'string' && d.includes('-') ? fromDateOnly(d) : new Date(d)
+            ),
             unavailableDates: (s.unavailableDates || []).map((d: any) => ({
-              start: new Date(d.start),
-              end: new Date(d.end)
+              start: typeof d.start === 'string' && d.start.includes('-') ? fromDateOnly(d.start) : new Date(d.start),
+              end: typeof d.end === 'string' && d.end.includes('-') ? fromDateOnly(d.end) : new Date(d.end)
             })),
             preferTogether: s.preferTogether || [],
             preferNotTogether: s.preferNotTogether || [],
@@ -56,7 +65,17 @@ export default function Index() {
 
   // Save data to localStorage on change
   useEffect(() => {
-    const data = { staff, config };
+    const data = {
+      staff: staff.map((s) => ({
+        ...s,
+        vacationDays: (s.vacationDays || []).map(toDateOnly),
+        unavailableDates: (s.unavailableDates || []).map((r) => ({
+          start: toDateOnly(r.start),
+          end: toDateOnly(r.end)
+        }))
+      })),
+      config
+    };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   }, [staff, config]);
 

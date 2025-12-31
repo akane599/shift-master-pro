@@ -1,6 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Shift, Staff } from '@/types/schedule';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter
+} from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
@@ -22,12 +29,12 @@ export function ShiftEditDialog({ shift, staff, open, onOpenChange, onSave }: Sh
   const [duration, setDuration] = useState<16 | 24>(24);
 
   // Sync state when shift changes
-  useState(() => {
+  useEffect(() => {
     if (shift) {
       setSelectedStaffIds([...shift.staffIds]);
       setDuration(shift.duration);
     }
-  });
+  }, [shift]);
 
   const handleOpenChange = (open: boolean) => {
     if (open && shift) {
@@ -66,6 +73,9 @@ export function ShiftEditDialog({ shift, staff, open, onOpenChange, onSave }: Sh
             <Clock className="w-5 h-5 text-primary" />
             Nöbet Düzenle - {format(shift.date, 'd MMMM yyyy', { locale: tr })}
           </DialogTitle>
+          <DialogDescription>
+            Bu gün için nöbet süresini ve nöbetçi personeli güncelleyin.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-6 py-4">
