@@ -90,80 +90,90 @@ export function generateSchedule(
   
   // Track who worked yesterday
   let assignedYesterday: Set<string> = new Set();
-  
-  // First pass: Assign primary 24-hour shifts to every day
+
+  // First pass: Ensure every day has at least one shift (prefer 24h)
   for (let day = 0; day < daysInMonth; day++) {
     const currentDate = addDays(monthStart, day);
-    
-    // Get staff who can work today and have room for 24 hours
-    const availableFor24 = staff.filter(s => 
-      canWorkOnDate(s, currentDate, assignedYesterday) && canAddHours(s.id, 24)
-    );
-    
-    // Get staff who can work today and have room for at least 16 hours
-    const availableFor16Only = staff.filter(s => 
-      canWorkOnDate(s, currentDate, assignedYesterday) && 
-      !canAddHours(s.id, 24) && 
-      canAddHours(s.id, 16)
-    );
-    
-    // Combine available staff, prioritizing those who can do full 24h
-    let availableStaff = [...availableFor24, ...availableFor16Only];
-    
-    // Sort by remaining hours needed (descending)
-    availableStaff.sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-    
-    // Select staff for this shift
+
     const targetStaffCount = Math.max(config.minStaffPerShift, 3);
-    let selectedStaff: Staff[] = [];
-    
-    for (const s of availableStaff) {
-      if (selectedStaff.length >= targetStaffCount) break;
-      
-      // Check prefer-not-together constraints
-      const hasConflict = selectedStaff.some(sel => 
-        checkPreferNotTogether(s, sel).preferred
-      );
+
+    // 1) Try to create a 24-hour shift first
+    const availableFor24 = staff
+      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday) && canAddHours(s.id, 24))
+      .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
+
+    let selectedStaff24: Staff[] = [];
+    for (const s of availableFor24) {
+      if (selectedStaff24.length >= targetStaffCount) break;
+
+      const hasConflict = selectedStaff24.some((sel) => checkPreferNotTogether(s, sel).preferred);
       if (hasConflict) continue;
-      
-      selectedStaff.push(s);
+
+      selectedStaff24.push(s);
     }
-    
-    // If we couldn't get enough people, try relaxing post-shift rule (emergency)
-    if (selectedStaff.length < config.minStaffPerShift) {
-      const emergencyPool = staff.filter(s => 
-        !isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || []) &&
-        !selectedStaff.includes(s) &&
-        (canAddHours(s.id, 24) || canAddHours(s.id, 16))
-      );
-      
+
+    // Emergency: relax post-shift rule BUT keep hour limits
+    if (selectedStaff24.length < config.minStaffPerShift) {
+      const emergencyPool = staff
+        .filter(
+          (s) =>
+            !isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || []) &&
+            !selectedStaff24.includes(s) &&
+            canAddHours(s.id, 24)
+        )
+        .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
+
       for (const s of emergencyPool) {
-        if (selectedStaff.length >= config.minStaffPerShift) break;
-        
-        const hasConflict = selectedStaff.some(sel => 
-          checkPreferNotTogether(s, sel).preferred
-        );
-        if (!hasConflict) {
-          selectedStaff.push(s);
-        }
+        if (selectedStaff24.length >= config.minStaffPerShift) break;
+        const hasConflict = selectedStaff24.some((sel) => checkPreferNotTogether(s, sel).preferred);
+        if (!hasConflict) selectedStaff24.push(s);
       }
     }
-    
-    if (selectedStaff.length > 0) {
+
+    if (selectedStaff24.length >= config.minStaffPerShift) {
       shifts.push({
         date: currentDate,
-        staffIds: selectedStaff.map(s => s.id),
+        staffIds: selectedStaff24.map((s) => s.id),
         duration: 24
       });
-      
-      // Update hours
-      selectedStaff.forEach(s => {
-        const currentHours = staffHours.get(s.id) || 0;
-        staffHours.set(s.id, currentHours + 24);
+
+      selectedStaff24.forEach((s) => {
+        staffHours.set(s.id, (staffHours.get(s.id) || 0) + 24);
       });
-      
-      assignedYesterday = new Set(selectedStaff.map(s => s.id));
+
+      assignedYesterday = new Set(selectedStaff24.map((s) => s.id));
+      continue;
+    }
+
+    // 2) If 24h cannot be formed, fall back to a 16-hour shift (still keeps the day non-empty)
+    const availableFor16 = staff
+      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday) && canAddHours(s.id, 16))
+      .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
+
+    let selectedStaff16: Staff[] = [];
+    for (const s of availableFor16) {
+      if (selectedStaff16.length >= targetStaffCount) break;
+
+      const hasConflict = selectedStaff16.some((sel) => checkPreferNotTogether(s, sel).preferred);
+      if (hasConflict) continue;
+
+      selectedStaff16.push(s);
+    }
+
+    if (selectedStaff16.length > 0) {
+      shifts.push({
+        date: currentDate,
+        staffIds: selectedStaff16.map((s) => s.id),
+        duration: 16
+      });
+
+      selectedStaff16.forEach((s) => {
+        staffHours.set(s.id, (staffHours.get(s.id) || 0) + 16);
+      });
+
+      assignedYesterday = new Set(selectedStaff16.map((s) => s.id));
     } else {
+      // Truly impossible day with current constraints
       assignedYesterday = new Set();
     }
   }
@@ -247,7 +257,18 @@ export function generateSchedule(
   const staffStats = calculateStats(staff, shifts);
   const inequalityScore = calculateInequalityScore(staffStats, staff, config.totalMonthlyHours);
   const suggestions = generateSuggestions(staffStats, inequalityScore, staff, config.totalMonthlyHours);
-  
+
+  // Feasibility hint: with "nöbet ertesi boş" kuralı, tam doluluk her zaman mümkün olmayabilir.
+  const maxShiftsPerStaff = Math.ceil(daysInMonth / 2);
+  const maxStaffSlots = staff.length * maxShiftsPerStaff;
+  const requiredSlots = daysInMonth * config.minStaffPerShift;
+  if (requiredSlots > maxStaffSlots) {
+    const minStaffNeeded = Math.ceil(requiredSlots / maxShiftsPerStaff);
+    suggestions.unshift(
+      `Uyarı: Mevcut kurallarla (nöbet ertesi boş) ayın tüm günlerini ${config.minStaffPerShift}+ kişiyle doldurmak matematiksel olarak zor/İmkansız olabilir. Bu ay için en az ~${minStaffNeeded} personel gerekir.`
+    );
+  }
+
   return {
     shifts,
     staffStats,
