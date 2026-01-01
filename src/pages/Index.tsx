@@ -14,9 +14,20 @@ import { toast } from '@/hooks/use-toast';
 const STORAGE_KEY = 'hospital-shift-scheduler-data';
 
 const toDateOnly = (d: Date) => format(d, 'yyyy-MM-dd');
+const isDateOnlyString = (value: unknown): value is string =>
+  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
 const fromDateOnly = (value: string) => {
   const [y, m, day] = value.split('-').map(Number);
   return new Date(y, m - 1, day);
+};
+
+const parseStoredDate = (value: unknown): Date => {
+  if (isDateOnlyString(value)) return fromDateOnly(value);
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+    // Handles older ISO strings like 2025-12-31T00:00:00.000Z without timezone day-shift.
+    return fromDateOnly(value.slice(0, 10));
+  }
+  return new Date(value as any);
 };
 
 export default function Index() {
@@ -37,15 +48,13 @@ export default function Index() {
       try {
         const data = JSON.parse(saved);
         if (data.staff) {
-          // Convert stored date-only strings back to Date objects (avoid timezone shifts)
+          // Convert stored date strings back to Date objects (avoid timezone shifts)
           const loadedStaff = data.staff.map((s: any) => ({
             ...s,
-            vacationDays: (s.vacationDays || []).map((d: string) =>
-              typeof d === 'string' && d.includes('-') ? fromDateOnly(d) : new Date(d)
-            ),
+            vacationDays: (s.vacationDays || []).map(parseStoredDate),
             unavailableDates: (s.unavailableDates || []).map((d: any) => ({
-              start: typeof d.start === 'string' && d.start.includes('-') ? fromDateOnly(d.start) : new Date(d.start),
-              end: typeof d.end === 'string' && d.end.includes('-') ? fromDateOnly(d.end) : new Date(d.end)
+              start: parseStoredDate(d?.start),
+              end: parseStoredDate(d?.end)
             })),
             preferTogether: s.preferTogether || [],
             preferNotTogether: s.preferNotTogether || [],
