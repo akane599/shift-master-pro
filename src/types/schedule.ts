@@ -15,10 +15,14 @@ export interface DateRange {
   end: Date;
 }
 
+export interface StaffAssignment {
+  staffId: string;
+  duration: 16 | 24;
+}
+
 export interface Shift {
   date: Date;
-  staffIds: string[];
-  duration: 16 | 24;
+  assignments: StaffAssignment[];
 }
 
 export interface ScheduleConfig {

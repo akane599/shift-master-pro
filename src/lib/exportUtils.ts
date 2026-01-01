@@ -6,8 +6,7 @@ export function exportToExcel(result: ScheduleResult, staff: Staff[], month: num
   const monthStart = startOfMonth(new Date(year, month));
   const daysInMonth = getDaysInMonth(monthStart);
   
-  // Create CSV content
-  let csv = 'Gün,Tarih,Süre (Saat),Personel\n';
+  let csv = 'Gün,Tarih,Personel (Süre)\n';
   
   for (let i = 0; i < daysInMonth; i++) {
     const date = addDays(monthStart, i);
@@ -19,16 +18,18 @@ export function exportToExcel(result: ScheduleResult, staff: Staff[], month: num
     const dateStr = format(date, 'd MMMM yyyy', { locale: tr });
     
     if (shift) {
-      const staffNames = shift.staffIds
-        .map(id => staff.find(s => s.id === id)?.name || 'Bilinmeyen')
+      const staffInfo = shift.assignments
+        .map(a => {
+          const staffMember = staff.find(s => s.id === a.staffId);
+          return `${staffMember?.name || 'Bilinmeyen'} (${a.duration}s)`;
+        })
         .join(' - ');
-      csv += `${dayName},${dateStr},${shift.duration},${staffNames}\n`;
+      csv += `${dayName},${dateStr},${staffInfo}\n`;
     } else {
-      csv += `${dayName},${dateStr},-,-\n`;
+      csv += `${dayName},${dateStr},-\n`;
     }
   }
   
-  // Add statistics
   csv += '\n\nPersonel İstatistikleri\n';
   csv += 'İsim,Toplam Saat,Nöbet Sayısı,24 Saat,16 Saat\n';
   
@@ -38,7 +39,6 @@ export function exportToExcel(result: ScheduleResult, staff: Staff[], month: num
   
   csv += `\nEşitsizlik Skoru,%${result.inequalityScore.toFixed(2)}\n`;
   
-  // Download
   const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
@@ -50,7 +50,6 @@ export function exportToPDF(result: ScheduleResult, staff: Staff[], month: numbe
   const monthStart = startOfMonth(new Date(year, month));
   const daysInMonth = getDaysInMonth(monthStart);
   
-  // Create printable HTML
   let html = `
     <!DOCTYPE html>
     <html>
@@ -67,9 +66,9 @@ export function exportToPDF(result: ScheduleResult, staff: Staff[], month: numbe
         .stats { margin-top: 30px; }
         .score { font-size: 24px; color: #0d9488; font-weight: bold; }
         .suggestions { background: #fef3c7; padding: 15px; border-radius: 8px; margin-top: 20px; }
-        @media print {
-          body { padding: 0; }
-        }
+        .duration-24 { color: #0d9488; font-weight: bold; }
+        .duration-16 { color: #f59e0b; }
+        @media print { body { padding: 0; } }
       </style>
     </head>
     <body>
@@ -80,7 +79,6 @@ export function exportToPDF(result: ScheduleResult, staff: Staff[], month: numbe
           <tr>
             <th>Gün</th>
             <th>Tarih</th>
-            <th>Süre</th>
             <th>Personel</th>
           </tr>
         </thead>
@@ -97,12 +95,16 @@ export function exportToPDF(result: ScheduleResult, staff: Staff[], month: numbe
     const dateStr = format(date, 'd MMMM', { locale: tr });
     
     if (shift) {
-      const staffNames = shift.staffIds
-        .map(id => staff.find(s => s.id === id)?.name || 'Bilinmeyen')
+      const staffInfo = shift.assignments
+        .map(a => {
+          const staffMember = staff.find(s => s.id === a.staffId);
+          const durationClass = a.duration === 24 ? 'duration-24' : 'duration-16';
+          return `<span class="${durationClass}">${staffMember?.name || 'Bilinmeyen'} (${a.duration}s)</span>`;
+        })
         .join(', ');
-      html += `<tr><td>${dayName}</td><td>${dateStr}</td><td>${shift.duration} saat</td><td>${staffNames}</td></tr>`;
+      html += `<tr><td>${dayName}</td><td>${dateStr}</td><td>${staffInfo}</td></tr>`;
     } else {
-      html += `<tr><td>${dayName}</td><td>${dateStr}</td><td>-</td><td>-</td></tr>`;
+      html += `<tr><td>${dayName}</td><td>${dateStr}</td><td>-</td></tr>`;
     }
   }
   
@@ -146,7 +148,6 @@ export function exportToPDF(result: ScheduleResult, staff: Staff[], month: numbe
     </html>
   `;
   
-  // Open in new window for printing
   const printWindow = window.open('', '_blank');
   if (printWindow) {
     printWindow.document.write(html);
