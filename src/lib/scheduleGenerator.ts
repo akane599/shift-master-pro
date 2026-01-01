@@ -67,86 +67,78 @@ export function generateSchedule(
   
   let assignedYesterday: Set<string> = new Set();
 
-  // First pass: Assign shifts for each day
+  // First pass: assign at least `minStaffPerShift` people to each day
   for (let day = 0; day < daysInMonth; day++) {
     const currentDate = addDays(monthStart, day);
-    const targetStaffCount = Math.max(config.minStaffPerShift, 3);
 
-    // Try 24-hour assignments first
-    const availableFor24 = staff
-      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday) && canAddHours(s.id, 24))
+    const pickDuration = (s: Staff): 16 | 24 | null => {
+      const remaining = getRemainingNeeded(s.id);
+      if (remaining >= 24 && canAddHours(s.id, 24)) return 24;
+      if (remaining >= 16 && canAddHours(s.id, 16)) return 16;
+      return null;
+    };
+
+    const classifyConflict = (
+      candidate: Staff,
+      currentAssignments: StaffAssignment[]
+    ): 'none' | 'soft' | 'strict' => {
+      let hasSoft = false;
+      for (const a of currentAssignments) {
+        const other = staff.find(st => st.id === a.staffId);
+        if (!other) continue;
+        const notTogether = checkPreferNotTogether(candidate, other);
+        if (!notTogether.preferred) continue;
+        if (notTogether.strict) return 'strict';
+        hasSoft = true;
+      }
+      return hasSoft ? 'soft' : 'none';
+    };
+
+    const candidates = staff
+      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday))
       .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
 
     const assignments: StaffAssignment[] = [];
-    
-    for (const s of availableFor24) {
-      if (assignments.length >= targetStaffCount) break;
-      const hasConflict = assignments.some((a) => {
-        const other = staff.find(st => st.id === a.staffId);
-        return other && checkPreferNotTogether(s, other).preferred;
-      });
-      if (hasConflict) continue;
-      assignments.push({ staffId: s.id, duration: 24 });
+    const softPool: StaffAssignment[] = [];
+
+    // 1) Prefer no-conflict picks
+    for (const s of candidates) {
+      if (assignments.length >= config.minStaffPerShift) break;
+
+      const duration = pickDuration(s);
+      if (!duration) continue;
+
+      const conflict = classifyConflict(s, assignments);
+      if (conflict === 'strict') continue;
+      if (conflict === 'soft') {
+        softPool.push({ staffId: s.id, duration });
+        continue;
+      }
+
+      assignments.push({ staffId: s.id, duration });
     }
 
-    // Emergency: relax post-shift rule if needed
+    // 2) If we still can't hit min staff, allow soft conflicts (but still respect strict)
     if (assignments.length < config.minStaffPerShift) {
-      const emergencyPool = staff
-        .filter((s) =>
-          !isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || []) &&
-          !assignments.some(a => a.staffId === s.id) &&
-          canAddHours(s.id, 24)
-        )
-        .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-
-      for (const s of emergencyPool) {
+      for (const a of softPool) {
         if (assignments.length >= config.minStaffPerShift) break;
-        const hasConflict = assignments.some((a) => {
-          const other = staff.find(st => st.id === a.staffId);
-          return other && checkPreferNotTogether(s, other).preferred;
-        });
-        if (!hasConflict) {
-          assignments.push({ staffId: s.id, duration: 24 });
+        if (!assignments.some(x => x.staffId === a.staffId)) {
+          assignments.push(a);
         }
       }
     }
 
-    // If we have enough staff, create the shift
-    if (assignments.length >= config.minStaffPerShift) {
-      shifts.push({ date: currentDate, assignments });
-      assignments.forEach((a) => {
-        staffHours.set(a.staffId, (staffHours.get(a.staffId) || 0) + a.duration);
-      });
-      assignedYesterday = new Set(assignments.map((a) => a.staffId));
+    // If day can't be filled, leave it empty (and reset yesterday set)
+    if (assignments.length < config.minStaffPerShift) {
+      assignedYesterday = new Set();
       continue;
     }
 
-    // Fallback: try 16-hour shifts
-    const availableFor16 = staff
-      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday) && canAddHours(s.id, 16))
-      .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-
-    for (const s of availableFor16) {
-      if (assignments.length >= targetStaffCount) break;
-      const hasConflict = assignments.some((a) => {
-        const other = staff.find(st => st.id === a.staffId);
-        return other && checkPreferNotTogether(s, other).preferred;
-      });
-      if (hasConflict) continue;
-      if (!assignments.some(a => a.staffId === s.id)) {
-        assignments.push({ staffId: s.id, duration: 16 });
-      }
-    }
-
-    if (assignments.length > 0) {
-      shifts.push({ date: currentDate, assignments });
-      assignments.forEach((a) => {
-        staffHours.set(a.staffId, (staffHours.get(a.staffId) || 0) + a.duration);
-      });
-      assignedYesterday = new Set(assignments.map((a) => a.staffId));
-    } else {
-      assignedYesterday = new Set();
-    }
+    shifts.push({ date: currentDate, assignments });
+    assignments.forEach((a) => {
+      staffHours.set(a.staffId, (staffHours.get(a.staffId) || 0) + a.duration);
+    });
+    assignedYesterday = new Set(assignments.map((a) => a.staffId));
   }
   
   // Second pass: Fill remaining hours with 16-hour shifts
