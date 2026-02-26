@@ -35,7 +35,7 @@ export default function Index() {
   const [config, setConfig] = useState<ScheduleConfig>({
     month: new Date().getMonth(),
     year: new Date().getFullYear(),
-    totalMonthlyHours: 720,
+    totalMonthlyHours: 168,
     minStaffPerShift: 2
   });
   const [result, setResult] = useState<ScheduleResult | null>(null);

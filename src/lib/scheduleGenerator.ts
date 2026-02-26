@@ -65,6 +65,13 @@ export function generateSchedule(
     return Math.max(0, target - current);
   };
   
+  const smartPickDuration = (staffId: string): 16 | 24 | null => {
+    const remaining = getRemainingNeeded(staffId);
+    if (remaining >= 24 && (remaining - 24) !== 8) return 24;
+    if (remaining >= 16 && (remaining - 16) !== 8) return 16;
+    return null;
+  };
+
   let assignedYesterday: Set<string> = new Set();
 
   // First pass: assign at least `minStaffPerShift` people to each day
@@ -72,10 +79,7 @@ export function generateSchedule(
     const currentDate = addDays(monthStart, day);
 
     const pickDuration = (s: Staff): 16 | 24 | null => {
-      const remaining = getRemainingNeeded(s.id);
-      if (remaining >= 24 && canAddHours(s.id, 24)) return 24;
-      if (remaining >= 16 && canAddHours(s.id, 16)) return 16;
-      return null;
+      return smartPickDuration(s.id);
     };
 
     const classifyConflict = (
@@ -141,71 +145,100 @@ export function generateSchedule(
     assignedYesterday = new Set(assignments.map((a) => a.staffId));
   }
   
-  // Second pass: Fill remaining hours with 16-hour shifts
+  // Second pass: Fill remaining hours with smart duration selection
   // Sort by deficit descending so we prioritize those who need more hours
   const staffByDeficit = [...staff].sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-  
+
   staffByDeficit.forEach(s => {
     let deficit = getRemainingNeeded(s.id);
-    
+
     while (deficit >= 16) {
+      const duration = smartPickDuration(s.id);
+      if (!duration) break;
+
       let bestDay: Date | null = null;
       let bestDayPeopleCount = Infinity;
-      
+
       for (let day = 0; day < daysInMonth; day++) {
         const currentDate = addDays(monthStart, day);
-        
+
         if (isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || [])) continue;
-        
+
         const existingShift = shifts.find(shift => isSameDay(shift.date, currentDate));
-        if (!existingShift) continue;
-        
-        const alreadyOnShift = existingShift.assignments.some(a => a.staffId === s.id);
+
+        const alreadyOnShift = existingShift
+          ? existingShift.assignments.some(a => a.staffId === s.id)
+          : false;
         if (alreadyOnShift) continue;
-        
+
         // Cannot work if worked yesterday (post-shift rest rule)
         const yesterday = addDays(currentDate, -1);
-        const workedYesterday = shifts.some(shift => 
+        const workedYesterday = shifts.some(shift =>
           isSameDay(shift.date, yesterday) && shift.assignments.some(a => a.staffId === s.id)
         );
         if (workedYesterday) continue;
-        
+
         // Cannot work if working tomorrow (because tomorrow would violate post-shift rest)
         const tomorrow = addDays(currentDate, 1);
-        const hasTomorrowShift = shifts.some(shift => 
+        const hasTomorrowShift = shifts.some(shift =>
           isSameDay(shift.date, tomorrow) && shift.assignments.some(a => a.staffId === s.id)
         );
         if (hasTomorrowShift) continue;
-        
-        // Only check strict conflicts for 16h fills
-        const hasConflict = existingShift.assignments.some(a => {
-          const other = staff.find(st => st.id === a.staffId);
-          if (!other) return false;
-          return checkPreferNotTogether(s, other).strict;
-        });
+
+        // Only check strict conflicts for existing shifts
+        const hasConflict = existingShift
+          ? existingShift.assignments.some(a => {
+              const other = staff.find(st => st.id === a.staffId);
+              if (!other) return false;
+              return checkPreferNotTogether(s, other).strict;
+            })
+          : false;
         if (hasConflict) continue;
-        
-        if (existingShift.assignments.length < bestDayPeopleCount) {
+
+        // Prefer existing shifts over empty days (empty days as last resort)
+        const peopleCount = existingShift
+          ? existingShift.assignments.length
+          : Number.MAX_SAFE_INTEGER;
+
+        if (peopleCount < bestDayPeopleCount) {
           bestDay = currentDate;
-          bestDayPeopleCount = existingShift.assignments.length;
+          bestDayPeopleCount = peopleCount;
         }
       }
-      
+
       if (bestDay) {
         const shiftIndex = shifts.findIndex(shift => isSameDay(shift.date, bestDay!));
         if (shiftIndex !== -1) {
-          shifts[shiftIndex].assignments.push({ staffId: s.id, duration: 16 });
-          staffHours.set(s.id, (staffHours.get(s.id) || 0) + 16);
-          deficit -= 16;
+          shifts[shiftIndex].assignments.push({ staffId: s.id, duration });
         } else {
-          break;
+          // Create a new shift for this day
+          shifts.push({ date: bestDay, assignments: [{ staffId: s.id, duration }] });
         }
+        staffHours.set(s.id, (staffHours.get(s.id) || 0) + duration);
+        deficit = getRemainingNeeded(s.id);
       } else {
         break;
       }
     }
   });
-  
+
+  // Third pass: close remaining 8h gaps by upgrading 16h -> 24h assignments
+  staff.forEach(s => {
+    const remaining = getRemainingNeeded(s.id);
+    if (remaining !== 8) return;
+
+    for (const shift of shifts) {
+      const assignment = shift.assignments.find(
+        a => a.staffId === s.id && a.duration === 16
+      );
+      if (assignment && canAddHours(s.id, 8)) {
+        assignment.duration = 24;
+        staffHours.set(s.id, (staffHours.get(s.id) || 0) + 8);
+        break;
+      }
+    }
+  });
+
   const staffStats = calculateStats(staff, shifts);
   const inequalityScore = calculateInequalityScore(staffStats, staff, config.totalMonthlyHours);
   const suggestions = generateSuggestions(staffStats, inequalityScore, staff, config.totalMonthlyHours);

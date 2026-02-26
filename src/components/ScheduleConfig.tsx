@@ -77,16 +77,16 @@ export function ScheduleConfig({ config, onConfigChange }: ScheduleConfigProps) 
         <div className="space-y-2">
           <Label className="flex items-center gap-2">
             <Clock className="w-4 h-4 text-muted-foreground" />
-            Toplam Aylık Mesai Saati
+            Kişi Başı Aylık Mesai Saati
           </Label>
           <Input
             type="number"
             value={config.totalMonthlyHours}
             onChange={(e) => onConfigChange({ ...config, totalMonthlyHours: parseInt(e.target.value) || 0 })}
-            placeholder="Örn: 720"
+            placeholder="Örn: 168"
           />
           <p className="text-xs text-muted-foreground">
-            Tüm personelin toplam çalışacağı saat
+            Her personelin aylık çalışacağı varsayılan saat
           </p>
         </div>
 
