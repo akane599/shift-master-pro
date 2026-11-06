@@ -12,6 +12,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { achievableHours } from '@/lib/scheduleRules';
+import { newId } from '@/lib/id';
 
 interface StaffManagerProps {
   staff: Staff[];
@@ -37,7 +38,7 @@ export function StaffManager({ staff, onStaffChange, defaultMonthlyHours }: Staf
   const addStaff = () => {
     if (!newName.trim()) return;
     const newStaff: Staff = {
-      id: crypto.randomUUID(),
+      id: newId(),
       name: newName.trim(),
       vacationDays: [],
       unavailableDates: [],

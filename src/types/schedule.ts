@@ -74,6 +74,10 @@ export interface StaffStats {
   shiftCount: number;
   shift24Count: number;
   shift16Count: number;
+  /** Real workload in hours: each hour of each shift split among everyone on duty then (see `workShare`). */
+  workload: number;
+  /** The workload these hours would carry if crowded days were shared evenly among everyone. */
+  fairWorkload: number;
   preferencesSatisfied: number;
   preferencesTotal: number;
 }

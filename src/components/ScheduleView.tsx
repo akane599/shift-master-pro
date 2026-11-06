@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils';
 import { ShiftEditDialog } from './ShiftEditDialog';
 import { toast } from '@/hooks/use-toast';
 import { dayKey } from '@/lib/scheduleRules';
+import { WORKLOAD_TOLERANCE, formatHours } from '@/lib/scheduleStats';
 
 interface ScheduleViewProps {
   /** The saved roster of `config`'s month with freshly computed stats, or null if that month has none. */
@@ -259,21 +260,33 @@ export function ScheduleView({ result, staff, config, workedPreviousDay = [], on
                   <th className="text-center py-2 px-2">Nöbet</th>
                   <th className="text-center py-2 px-2">24s</th>
                   <th className="text-center py-2 px-2">16s</th>
+                  <th className="text-center py-2 px-2">Gerçek Yük</th>
                   <th className="text-center py-2 px-2">Tercih</th>
                 </tr>
               </thead>
               <tbody>
                 {result.staffStats.map(stat => {
                   const hitTarget = stat.totalHours === stat.targetHours;
+                  const gap = stat.workload - stat.fairWorkload;
                   return (
                     <tr key={stat.staffId} className="border-b border-border/50">
                       <td className="py-2 px-2 font-medium">{stat.name}</td>
-                      <td className={cn("text-center py-2 px-2 font-mono", hitTarget ? "text-success" : "text-warning")}>
+                      <td className={cn("text-center py-2 px-2 font-mono whitespace-nowrap", hitTarget ? "text-success" : "text-warning")}>
                         {stat.totalHours} / {stat.targetHours}
                       </td>
                       <td className="text-center py-2 px-2">{stat.shiftCount}</td>
                       <td className="text-center py-2 px-2">{stat.shift24Count}</td>
                       <td className="text-center py-2 px-2">{stat.shift16Count}</td>
+                      <td className="text-center py-2 px-2 font-mono whitespace-nowrap">
+                        {stat.totalHours > 0 ? (
+                          <>
+                            <div>{formatHours(stat.workload)}</div>
+                            <div className={cn("text-[11px]", Math.abs(gap) > WORKLOAD_TOLERANCE / 2 ? "text-warning" : "text-muted-foreground")}>
+                              {gap > 0.05 ? '+' : ''}{formatHours(gap)}
+                            </div>
+                          </>
+                        ) : '-'}
+                      </td>
                       <td className="text-center py-2 px-2">
                         {stat.preferencesTotal > 0 ? (
                           <span className={cn(
@@ -291,6 +304,9 @@ export function ScheduleView({ result, staff, config, workedPreviousDay = [], on
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            Gerçek yük: günün her saati, o saatte nöbette olanlara bölünür (24 saatlik nöbet 08:30–08:30, 16 saatlik 08:30–00:00). Kalabalık günlere denk gelen daha az çalışmış olur. Alttaki sayı, saatine göre adil paydan farkı gösterir.
+          </p>
         </CardContent>
       </Card>
 

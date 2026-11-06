@@ -2,9 +2,11 @@ import type { ScheduleConfig, ScheduleResult, Shift, Staff, StaffAssignment } fr
 import {
   availableDays,
   getMonthDays,
+  LONG_SHIFT,
   longShiftCount,
   notTogetherRelation,
   planStaff,
+  workShare,
   type MonthContext,
   type StaffPlan,
 } from './scheduleRules';
@@ -23,6 +25,11 @@ import { evaluateSchedule } from './scheduleStats';
  *    together partners, soft "not together" pairs, and extra people above the minimum.
  * 3. Durations. Each person's 24h/16h split is fixed by their shift count; which days get the 24h shifts is
  *    chosen to spread 24h shifts evenly across the month.
+ * 4. Real workload (see workShare). Days with more people on duty are lighter for each of them, so a second
+ *    annealing pass trades days between two people with the same shift length until everyone's real workload
+ *    is in proportion to their hours. A trade changes no day's head count or 24h count and nobody's hours, so
+ *    steps 1–3 stay intact; it is checked against the same hard rules, and preferences still count. People
+ *    with a strict "together" partner are left out, since a trade would split the pair.
  */
 
 export interface GenerateOptions extends MonthContext {
@@ -37,11 +44,16 @@ const WEIGHT = {
   softNotTogether: 8, // per shift shared by a soft "not together" pair
   softTogether: 3, // per shift where an "Optimize" together partner is absent
   extraStaff: 1, // × (people above the minimum)² per day: spreads extras evenly, favours fewer/longer shifts
+  // Step 4 only: × (hours off a fair share of the real workload)², summed over staff. Outweighs the soft
+  // preferences; strict "together" pairs are never traded in step 4 at all.
+  workload: 3,
 };
 
 const RESTARTS = 3;
 const START_TEMPERATURE = 30;
 const END_TEMPERATURE = 0.2;
+const BALANCE_START_TEMPERATURE = 3;
+const BALANCE_END_TEMPERATURE = 0.05;
 
 interface Partner {
   other: number;
@@ -120,8 +132,11 @@ class Roster {
     this.perStaff[p] += sign;
   }
 
-  /** Applies all flips if each is legal, then keeps them per the Metropolis rule. Returns whether kept. */
-  tryMove(flips: Flip[], temperature: number, rand: () => number): boolean {
+  /**
+   * Applies all flips if each is legal, then keeps them per the Metropolis rule. Returns whether kept.
+   * `extraCost`: cost change of the move outside the roster's own cost (step 4's workload term).
+   */
+  tryMove(flips: Flip[], temperature: number, rand: () => number, extraCost = 0): boolean {
     const start = this.cost;
     let applied = 0;
     for (const [p, d, add] of flips) {
@@ -130,7 +145,7 @@ class Roster {
       applied++;
     }
     if (applied === flips.length) {
-      const delta = this.cost - start;
+      const delta = this.cost - start + extraCost;
       if (delta <= 0 || rand() < Math.exp(-delta / temperature)) return true;
     }
     for (let i = applied - 1; i >= 0; i--) this.toggle(flips[i][0], flips[i][1]);
@@ -334,11 +349,74 @@ export function generateSchedule(staff: Staff[], config: ScheduleConfig, options
     }
   }
 
+  /** Step 4: trades days between people with the same shift length. Returns the best durations found (0 = off). */
+  const balanceWorkload = (on: Uint8Array, start: Uint8Array): Uint8Array => {
+    const r = newRoster();
+    on.forEach((v, i) => v && r.toggle(Math.floor(i / D), i % D));
+    const length = start.slice();
+    // Head count and 24h count per day never change in this step, so neither does a shift's share of its day.
+    const night = new Int32Array(D);
+    for (let i = 0; i < S * D; i++) if (length[i] === LONG_SHIFT) night[i % D]++;
+    const shareOn = (hours: number, d: number) => workShare(hours, r.perDay[d], night[d]);
+    const hours = new Float64Array(S);
+    const load = new Float64Array(S);
+    for (let i = 0; i < S * D; i++) {
+      if (!length[i]) continue;
+      hours[Math.floor(i / D)] += length[i];
+      load[Math.floor(i / D)] += shareOn(length[i], i % D);
+    }
+    const working = hours.filter((h) => h > 0);
+    if (working.length < 2) return length;
+    const meanHours = working.reduce((a, b) => a + b, 0) / working.length;
+    // The month's total work is fixed, so Σ load²/hours is smallest when load/hours is the same for everyone.
+    // Scaled by the mean hours, one unit is about one hour² off a fair share.
+    const spread = (p: number, l: number) => (hours[p] ? (meanHours * l * l) / hours[p] : 0);
+
+    let cost = r.cost + WEIGHT.workload * Array.from(load, (l, p) => spread(p, l)).reduce((a, b) => a + b, 0);
+    let bestCost = cost;
+    let best = length.slice();
+    const iterations = Math.min(100_000, 10_000 + S * D * 40);
+    const cooling = BALANCE_END_TEMPERATURE / BALANCE_START_TEMPERATURE;
+    for (let it = 0; it < iterations; it++) {
+      const p = randInt(S);
+      const q = randInt(S);
+      // People with a strict "together" partner keep their days: trading one of them alone splits the pair.
+      if (groups[p].length || groups[q].length) continue;
+      const d = workingDay(r, p);
+      const e = p !== q ? workingDay(r, q) : -1;
+      if (d < 0 || e < 0 || d === e || r.has(p, e) || r.has(q, d)) continue;
+      const x = length[p * D + d];
+      if (length[q * D + e] !== x) continue;
+      // p moves from day d to e, q from e to d, both keeping shift length x.
+      const change = shareOn(x, e) - shareOn(x, d);
+      const extra =
+        WEIGHT.workload *
+        (spread(p, load[p] + change) - spread(p, load[p]) + spread(q, load[q] - change) - spread(q, load[q]));
+      const before = r.cost;
+      const temperature = BALANCE_START_TEMPERATURE * cooling ** (it / iterations);
+      if (!r.tryMove([[p, d, false], [q, e, false], [p, e, true], [q, d, true]], temperature, rand, extra)) continue;
+      cost += r.cost - before + extra;
+      load[p] += change;
+      load[q] -= change;
+      length[p * D + d] = 0;
+      length[q * D + e] = 0;
+      length[p * D + e] = x;
+      length[q * D + d] = x;
+      if (cost < bestCost - 1e-9) {
+        bestCost = cost;
+        best = length.slice();
+      }
+    }
+    return best;
+  };
+
+  const finalDuration = bestOn ? balanceWorkload(bestOn, duration) : duration;
+
   const shifts: Shift[] = [];
   days.forEach((date, d) => {
     const assignments: StaffAssignment[] = [];
     staff.forEach((s, p) => {
-      const hours = duration[p * D + d];
+      const hours = finalDuration[p * D + d];
       if (hours) assignments.push({ staffId: s.id, duration: hours as 16 | 24 });
     });
     if (assignments.length) shifts.push({ date, assignments });

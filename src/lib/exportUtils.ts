@@ -1,6 +1,7 @@
 import { ScheduleResult, Staff } from '@/types/schedule';
 import { format, startOfMonth, getDaysInMonth, addDays } from 'date-fns';
 import { tr } from 'date-fns/locale';
+import { formatHours } from './scheduleStats';
 
 /** Escapes text for HTML. Names and warnings are user input and must never be parsed as markup. */
 export function escapeHtml(value: string): string {
@@ -48,10 +49,19 @@ export function buildCsv(result: ScheduleResult, staff: Staff[], month: number, 
   }
 
   csv += '\n\n' + csvRow('Personel İstatistikleri');
-  csv += csvRow('İsim', 'Toplam Saat', 'Hedef Saat', 'Nöbet Sayısı', '24 Saat', '16 Saat');
+  csv += csvRow('İsim', 'Toplam Saat', 'Hedef Saat', 'Nöbet Sayısı', '24 Saat', '16 Saat', 'Gerçek Yük', 'Adil Pay');
 
   result.staffStats.forEach(stat => {
-    csv += csvRow(stat.name, stat.totalHours, stat.targetHours, stat.shiftCount, stat.shift24Count, stat.shift16Count);
+    csv += csvRow(
+      stat.name,
+      stat.totalHours,
+      stat.targetHours,
+      stat.shiftCount,
+      stat.shift24Count,
+      stat.shift16Count,
+      formatHours(stat.workload),
+      formatHours(stat.fairWorkload)
+    );
   });
 
   csv += '\n' + csvRow('Hedef Saat Sapması', `%${result.targetDeviation.toFixed(2).replace('.', ',')}`);
@@ -146,13 +156,15 @@ export function buildPrintHtml(result: ScheduleResult, staff: Staff[], month: nu
               <th>Nöbet Sayısı</th>
               <th>24 Saat</th>
               <th>16 Saat</th>
+              <th>Gerçek Yük</th>
+              <th>Adil Pay</th>
             </tr>
           </thead>
           <tbody>
   `;
-  
+
   result.staffStats.forEach(stat => {
-    html += `<tr><td>${escapeHtml(stat.name)}</td><td>${stat.totalHours}</td><td>${stat.targetHours}</td><td>${stat.shiftCount}</td><td>${stat.shift24Count}</td><td>${stat.shift16Count}</td></tr>`;
+    html += `<tr><td>${escapeHtml(stat.name)}</td><td>${stat.totalHours}</td><td>${stat.targetHours}</td><td>${stat.shiftCount}</td><td>${stat.shift24Count}</td><td>${stat.shift16Count}</td><td>${formatHours(stat.workload)}</td><td>${formatHours(stat.fairWorkload)}</td></tr>`;
   });
   
   html += `
