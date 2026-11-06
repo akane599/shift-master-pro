@@ -4,17 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-"Nöbet Planlayıcı": a client-only React app that generates monthly hospital on-call (nöbet) rosters for nurses. There is no backend. All data lives in the browser's `localStorage`. It is a Lovable project: most commits come from `gpt-engineer-app[bot]`, and pushes to this repo sync back to Lovable. Keep the code in a shape Lovable can keep editing (Vite + React + shadcn/ui + Tailwind, with the `@/` alias pointing at `src/`).
+"Nöbet Planlayıcı": a client-only React app that generates monthly hospital on-call (nöbet) rosters for nurses. There is no backend. All data lives in the browser's `localStorage`. Stack: Vite + React + TypeScript + shadcn/ui + Tailwind, with the `@/` alias pointing at `src/`.
 
 All user-facing text is in Turkish, and some code comments are too. New UI strings should also be in Turkish.
 
 ## Commands
 
 ```sh
-npm i                 # install (package-lock.json is canonical; bun.lockb also exists but bun isn't used here)
-npm run dev           # Vite dev server on port 8080 (host "::")
+npm i                 # install (npm, package-lock.json)
+npm run dev           # Vite dev server on port 8080, all interfaces (host "::") so a phone on the LAN or Tailscale can open it
 npm run build         # production build to dist/
-npm run build:dev     # development-mode build (enables lovable-tagger)
 npm run lint          # ESLint (flat config, eslint.config.js); must report 0 errors
 npm run typecheck     # tsc for the app and the Vite/Vitest configs
 npm test              # vitest, single run
@@ -75,4 +74,4 @@ Exports (`exportUtils.ts`): the print view escapes every user string with `escap
 
 ### Routing
 
-`App.tsx` sets up React Router. Add new routes above the catch-all `*` route; Lovable's template comment marks that spot.
+`App.tsx` sets up React Router. Add new routes above the catch-all `*` route; a comment marks that spot.

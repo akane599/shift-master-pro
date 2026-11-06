@@ -1,73 +1,33 @@
-# Welcome to your Lovable project
+# Nöbet Planlayıcı
 
-## Project info
+Hemşireler için aylık hastane nöbet çizelgesi oluşturan bir web uygulaması. Sunucusu yok: personel, ayarlar ve çizelgeler tarayıcıda (`localStorage`) saklanır, bu yüzden her cihazın ve tarayıcının kendi verisi olur.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+- Herkesin saat hedefini 24 ve 16 saatlik nöbetlerle tam tutturur. Nöbet ertesi gün boş kalır; izinlere ve "birlikte / ayrı çalışma" tercihlerine uyar.
+- Kalabalık günleri herkese eşit paylaştırır ve her kişinin gerçek yükünü gösterir.
+- Çizelge elle düzenlenebilir, Excel (CSV) ve yazdırılabilir PDF olarak indirilebilir.
 
-## How can I edit this code?
+## Çalıştırma
 
-There are several ways of editing your application.
-
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
+Node.js 22 veya üstü gerekir.
 
 ```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
 npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+Ardından http://localhost:8080 adresini açın. Geliştirme sunucusu tüm ağ arayüzlerini dinler. Aynı ağdaki ya da Tailscale'deki bir telefondan `http://<bilgisayarın-ip-adresi>:8080` ile de açılabilir.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Kontroller
 
-**Use GitHub Codespaces**
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+GitHub Actions bunları her push'ta ve pull request'te çalıştırır.
 
-## What technologies are used for this project?
+## Teknolojiler
 
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+Vite, React, TypeScript, Tailwind CSS ve shadcn/ui.
