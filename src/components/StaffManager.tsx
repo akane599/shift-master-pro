@@ -11,6 +11,7 @@ import { Calendar as CalendarComponent } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import { achievableHours } from '@/lib/scheduleRules';
 
 interface StaffManagerProps {
   staff: Staff[];
@@ -318,6 +319,12 @@ export function StaffManager({ staff, onStaffChange, defaultMonthlyHours }: Staf
                 <Badge variant="outline" className="mt-2 text-xs bg-warning/20 text-warning border-warning/50">
                   {defaultMonthlyHours - selectedStaff.monthlyHours} saat az çalışacak
                 </Badge>
+              )}
+              {selectedStaff.monthlyHours !== undefined && achievableHours(selectedStaff.monthlyHours) !== selectedStaff.monthlyHours && (
+                <p className="mt-2 text-xs text-warning">
+                  {selectedStaff.monthlyHours} saat 24 ve 16 saatlik nöbetlerle tam yazılamaz; 8'in katı bir değer girin (8 hariç).
+                  Şu haliyle {achievableHours(selectedStaff.monthlyHours)} saat planlanır.
+                </p>
               )}
             </div>
 

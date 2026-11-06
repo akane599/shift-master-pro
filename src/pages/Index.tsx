@@ -1,92 +1,81 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { format } from 'date-fns';
-import { Staff, ScheduleConfig, ScheduleResult } from '@/types/schedule';
+import { tr } from 'date-fns/locale';
+import type { AppData, ScheduleConfig, ScheduleResult, Shift, Staff } from '@/types/schedule';
 import { StaffManager } from '@/components/StaffManager';
 import { ScheduleConfig as ScheduleConfigComponent } from '@/components/ScheduleConfig';
 import { ScheduleView } from '@/components/ScheduleView';
 import { generateSchedule } from '@/lib/scheduleGenerator';
+import { evaluateSchedule } from '@/lib/scheduleStats';
+import { getMonthDays, monthKey, previousMonth, staffOnDay } from '@/lib/scheduleRules';
+import { loadAppData, saveAppData } from '@/lib/persistence';
 import { exportToExcel, exportToPDF } from '@/lib/exportUtils';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog';
 import { Calendar, Users, Settings, FileSpreadsheet, FileText, Sparkles, Stethoscope } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 
-const STORAGE_KEY = 'hospital-shift-scheduler-data';
-
-const toDateOnly = (d: Date) => format(d, 'yyyy-MM-dd');
-const isDateOnlyString = (value: unknown): value is string =>
-  typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
-const fromDateOnly = (value: string) => {
-  const [y, m, day] = value.split('-').map(Number);
-  return new Date(y, m - 1, day);
-};
-
-const parseStoredDate = (value: unknown): Date => {
-  if (isDateOnlyString(value)) return fromDateOnly(value);
-  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value)) {
-    // Handles older ISO strings like 2025-12-31T00:00:00.000Z without timezone day-shift.
-    return fromDateOnly(value.slice(0, 10));
-  }
-  return new Date(value as any);
-};
-
 export default function Index() {
-  const [staff, setStaff] = useState<Staff[]>([]);
-  const [config, setConfig] = useState<ScheduleConfig>({
-    month: new Date().getMonth(),
-    year: new Date().getFullYear(),
-    totalMonthlyHours: 720,
-    minStaffPerShift: 2
-  });
-  const [result, setResult] = useState<ScheduleResult | null>(null);
+  // Saved data is read before the first render, so the first save writes back exactly what was loaded.
+  const [loaded] = useState(() => loadAppData());
+  const [staff, setStaff] = useState<Staff[]>(loaded.data.staff);
+  const [config, setConfig] = useState<ScheduleConfig>(loaded.data.config);
+  const [rosters, setRosters] = useState<AppData['rosters']>(loaded.data.rosters);
+  const [carryIn, setCarryIn] = useState<AppData['carryIn']>(loaded.data.carryIn);
   const [activeTab, setActiveTab] = useState('staff');
+  const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+  const saveFailureShown = useRef(false);
 
-  // Load data from localStorage on mount
   useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const data = JSON.parse(saved);
-        if (data.staff) {
-          // Convert stored date strings back to Date objects (avoid timezone shifts)
-          const loadedStaff = data.staff.map((s: any) => ({
-            ...s,
-            vacationDays: (s.vacationDays || []).map(parseStoredDate),
-            unavailableDates: (s.unavailableDates || []).map((d: any) => ({
-              start: parseStoredDate(d?.start),
-              end: parseStoredDate(d?.end)
-            })),
-            preferTogether: s.preferTogether || [],
-            preferNotTogether: s.preferNotTogether || [],
-            preferTogetherStrict: s.preferTogetherStrict || false,
-            preferNotTogetherStrict: s.preferNotTogetherStrict || false
-          }));
-          setStaff(loadedStaff);
-        }
-        if (data.config) {
-          setConfig(data.config);
-        }
-      } catch (e) {
-        console.error('Failed to load saved data:', e);
-      }
+    if (!loaded.problems.length) return;
+    toast({
+      title: 'Kayıtlı verinin bir kısmı okunamadı',
+      description: `${loaded.problems.join(' ')}${loaded.backupKey ? ` Orijinal veri "${loaded.backupKey}" anahtarıyla yedeklendi.` : ''}`,
+      variant: 'destructive'
+    });
+  }, [loaded]);
+
+  useEffect(() => {
+    if (saveAppData({ staff, config, rosters, carryIn })) {
+      saveFailureShown.current = false;
+    } else if (!saveFailureShown.current) {
+      saveFailureShown.current = true;
+      toast({
+        title: 'Kaydedilemedi',
+        description: 'Tarayıcı depolamasına yazılamadı. Değişiklikler sayfa yenilenince kaybolur.',
+        variant: 'destructive'
+      });
     }
-  }, []);
+  }, [staff, config, rosters, carryIn]);
 
-  // Save data to localStorage on change
-  useEffect(() => {
-    const data = {
-      staff: staff.map((s) => ({
-        ...s,
-        vacationDays: (s.vacationDays || []).map(toDateOnly),
-        unavailableDates: (s.unavailableDates || []).map((r) => ({
-          start: toDateOnly(r.start),
-          end: toDateOnly(r.end)
-        }))
-      })),
-      config
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  }, [staff, config]);
+  const key = monthKey(config);
+  const roster = rosters[key];
+
+  // Who worked the last day of the previous month: from its saved roster, or entered by hand in Ayarlar.
+  const prevRoster = rosters[monthKey(previousMonth(config))];
+  const workedPreviousDay = useMemo(() => {
+    if (!prevRoster) return carryIn[key] ?? [];
+    const prevDays = getMonthDays(prevRoster);
+    return staffOnDay(prevRoster.shifts, prevDays[prevDays.length - 1]);
+  }, [prevRoster, carryIn, key]);
+
+  // Stats are always recomputed from the current staff and settings, so they can't go stale.
+  const result: ScheduleResult | null = useMemo(
+    () => (roster ? { shifts: roster.shifts, ...evaluateSchedule(staff, roster.shifts, config, { workedPreviousDay }) } : null),
+    [roster, staff, config, workedPreviousDay]
+  );
+
+  const monthLabel = format(new Date(config.year, config.month), 'MMMM yyyy', { locale: tr });
 
   const handleGenerate = () => {
     if (staff.length < config.minStaffPerShift) {
@@ -97,19 +86,31 @@ export default function Index() {
       });
       return;
     }
+    if (roster) {
+      setConfirmOverwrite(true);
+      return;
+    }
+    generate();
+  };
 
-    const scheduleResult = generateSchedule(staff, config);
-    setResult(scheduleResult);
+  const generate = () => {
+    const seed = Math.floor(Math.random() * 2 ** 32);
+    const scheduleResult = generateSchedule(staff, config, { seed, workedPreviousDay });
+    setRosters((prev) => ({ ...prev, [key]: { month: config.month, year: config.year, shifts: scheduleResult.shifts, seed } }));
     setActiveTab('schedule');
-    
+
     toast({
       title: 'Çizelge Oluşturuldu',
-      description: `${scheduleResult.shifts.length} nöbet planlandı. Eşitsizlik skoru: %${scheduleResult.inequalityScore.toFixed(1)}`
+      description: `${scheduleResult.shifts.length} nöbet günü planlandı. Hedef saat sapması: %${scheduleResult.targetDeviation.toFixed(1)}`
     });
   };
 
-  const handleUpdateResult = (newResult: ScheduleResult) => {
-    setResult(newResult);
+  const handleShiftsChange = (shifts: Shift[]) => {
+    setRosters((prev) => (prev[key] ? { ...prev, [key]: { ...prev[key], shifts } } : prev));
+  };
+
+  const handleCarryInChange = (ids: string[]) => {
+    setCarryIn((prev) => ({ ...prev, [key]: ids }));
   };
 
   const handleExportExcel = () => {
@@ -141,12 +142,12 @@ export default function Index() {
                 <p className="text-xs text-muted-foreground">Hastane Vardiya Yönetimi</p>
               </div>
             </div>
-            
+
             <div className="flex items-center gap-2">
               {result && (
                 <>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     size="sm"
                     onClick={handleExportExcel}
                     className="hidden sm:flex"
@@ -154,8 +155,8 @@ export default function Index() {
                     <FileSpreadsheet className="w-4 h-4 mr-2" />
                     Excel
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     size="sm"
                     onClick={handleExportPDF}
                     className="hidden sm:flex"
@@ -200,33 +201,40 @@ export default function Index() {
 
           <TabsContent value="config" className="animate-fade-in">
             <div className="max-w-md mx-auto">
-              <ScheduleConfigComponent config={config} onConfigChange={setConfig} />
+              <ScheduleConfigComponent
+                config={config}
+                onConfigChange={setConfig}
+                staff={staff}
+                workedPreviousDay={workedPreviousDay}
+                previousRosterSaved={!!prevRoster}
+                onWorkedPreviousDayChange={handleCarryInChange}
+              />
             </div>
           </TabsContent>
 
           <TabsContent value="schedule" className="animate-fade-in">
             <div className="max-w-4xl mx-auto">
-              <ScheduleView 
-                result={result} 
+              <ScheduleView
+                result={result}
                 staff={staff}
-                month={config.month}
-                year={config.year}
-                onResultChange={handleUpdateResult}
+                config={config}
+                workedPreviousDay={workedPreviousDay}
+                onShiftsChange={handleShiftsChange}
               />
-              
+
               {/* Mobile export buttons */}
               {result && (
                 <div className="flex gap-2 mt-6 sm:hidden">
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     className="flex-1"
                     onClick={handleExportExcel}
                   >
                     <FileSpreadsheet className="w-4 h-4 mr-2" />
                     Excel
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     className="flex-1"
                     onClick={handleExportPDF}
                   >
@@ -240,10 +248,25 @@ export default function Index() {
         </Tabs>
       </main>
 
+      <AlertDialog open={confirmOverwrite} onOpenChange={setConfirmOverwrite}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{monthLabel} çizelgesi yeniden oluşturulsun mu?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Bu ay için kayıtlı bir çizelge var. Yeniden oluşturursanız elle yaptığınız değişiklikler dahil mevcut çizelge silinir.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Vazgeç</AlertDialogCancel>
+            <AlertDialogAction onClick={generate}>Yeniden Oluştur</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Footer */}
       <footer className="border-t border-border mt-auto py-4">
         <div className="container mx-auto px-4 text-center text-xs text-muted-foreground">
-          <p>Hastane Nöbet Planlayıcı • Veriler tarayıcıda saklanır</p>
+          <p>Hastane Nöbet Planlayıcı • Personel, ayarlar ve çizelgeler bu tarayıcıda saklanır</p>
           <p className="mt-1 opacity-50">Made by Tuğberk Özgen</p>
         </div>
       </footer>

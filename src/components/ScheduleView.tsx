@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ScheduleResult, Staff, Shift, StaffAssignment } from '@/types/schedule';
+import { ScheduleConfig, ScheduleResult, Staff, Shift } from '@/types/schedule';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { format, startOfMonth, getDaysInMonth, addDays, getDay } from 'date-fns';
@@ -8,18 +8,22 @@ import { CalendarDays, AlertTriangle, CheckCircle, TrendingUp, Lightbulb, Edit3 
 import { cn } from '@/lib/utils';
 import { ShiftEditDialog } from './ShiftEditDialog';
 import { toast } from '@/hooks/use-toast';
+import { dayKey } from '@/lib/scheduleRules';
 
 interface ScheduleViewProps {
+  /** The saved roster of `config`'s month with freshly computed stats, or null if that month has none. */
   result: ScheduleResult | null;
   staff: Staff[];
-  month: number;
-  year: number;
-  onResultChange?: (result: ScheduleResult) => void;
+  config: ScheduleConfig;
+  /** Staff on duty on the previous month's last day (rest rule for day 1). */
+  workedPreviousDay?: string[];
+  onShiftsChange?: (shifts: Shift[]) => void;
 }
 
 const dayNames = ['Paz', 'Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt'];
 
-export function ScheduleView({ result, staff, month, year, onResultChange }: ScheduleViewProps) {
+export function ScheduleView({ result, staff, config, workedPreviousDay = [], onShiftsChange }: ScheduleViewProps) {
+  const { month, year } = config;
   const [editingShift, setEditingShift] = useState<Shift | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
 
@@ -29,7 +33,7 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
         <CardContent className="py-12 text-center">
           <CalendarDays className="w-12 h-12 mx-auto mb-4 text-muted-foreground" />
           <p className="text-muted-foreground">
-            Çizelge oluşturmak için "Oluştur" butonuna tıklayın
+            {format(new Date(year, month), 'MMMM yyyy', { locale: tr })} için kayıtlı çizelge yok. Oluşturmak için "Oluştur" butonuna tıklayın.
           </p>
         </CardContent>
       </Card>
@@ -49,18 +53,17 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
   }
 
   const getShiftForDay = (date: Date) => {
-    return result.shifts.find(s => 
-      format(s.date, 'yyyy-MM-dd') === format(date, 'yyyy-MM-dd')
-    );
+    return result.shifts.find(s => dayKey(s.date) === dayKey(date));
   };
 
   const getStaffName = (id: string) => {
-    return staff.find(s => s.id === id)?.name || 'Bilinmeyen';
+    return staff.find(s => s.id === id)?.name || 'Silinmiş';
   };
 
-  const getInequalityColor = (score: number) => {
-    if (score < 10) return 'text-success';
-    if (score < 20) return 'text-warning';
+  const onTarget = result.targetDeviation < 0.05;
+  const getDeviationColor = (deviation: number) => {
+    if (deviation < 0.05) return 'text-success';
+    if (deviation < 5) return 'text-warning';
     return 'text-destructive';
   };
 
@@ -71,76 +74,29 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
   const has24HourAssignment = (shift: Shift) => shift.assignments.some(a => a.duration === 24);
   const has16HourAssignment = (shift: Shift) => shift.assignments.some(a => a.duration === 16);
 
-  const handleShiftClick = (shift: Shift) => {
-    setEditingShift(shift);
+  const handleDayClick = (date: Date) => {
+    if (!onShiftsChange) return;
+    // Empty days are editable too, so a gap can be filled by hand.
+    setEditingShift(getShiftForDay(date) ?? { date, assignments: [] });
     setIsDialogOpen(true);
   };
 
   const handleShiftSave = (updatedShift: Shift) => {
-    if (!result || !onResultChange) return;
+    if (!result || !onShiftsChange) return;
 
-    const updatedShifts = result.shifts.map(s => 
-      format(s.date, 'yyyy-MM-dd') === format(updatedShift.date, 'yyyy-MM-dd')
-        ? updatedShift
-        : s
-    );
+    const key = dayKey(updatedShift.date);
+    const others = result.shifts.filter(s => dayKey(s.date) !== key);
+    const shifts = updatedShift.assignments.length
+      ? [...others, updatedShift].sort((a, b) => a.date.getTime() - b.date.getTime())
+      : others;
 
-    const staffStats = staff.map(s => {
-      const staffShifts = updatedShifts.filter(shift => shift.assignments.some(a => a.staffId === s.id));
-      const totalHours = staffShifts.reduce((sum, shift) => {
-        const assignment = shift.assignments.find(a => a.staffId === s.id);
-        return sum + (assignment?.duration || 0);
-      }, 0);
-      const shift24Count = staffShifts.filter(shift => {
-        const assignment = shift.assignments.find(a => a.staffId === s.id);
-        return assignment?.duration === 24;
-      }).length;
-      const shift16Count = staffShifts.filter(shift => {
-        const assignment = shift.assignments.find(a => a.staffId === s.id);
-        return assignment?.duration === 16;
-      }).length;
-      
-      let preferencesSatisfied = 0;
-      let preferencesTotal = 0;
-      
-      staffShifts.forEach(shift => {
-        const staffIds = shift.assignments.map(a => a.staffId);
-        s.preferTogether.forEach(partnerId => {
-          preferencesTotal++;
-          if (staffIds.includes(partnerId)) {
-            preferencesSatisfied++;
-          }
-        });
-      });
-      
-      return {
-        staffId: s.id,
-        name: s.name,
-        totalHours,
-        shiftCount: staffShifts.length,
-        shift24Count,
-        shift16Count,
-        preferencesSatisfied,
-        preferencesTotal
-      };
-    });
-
-    const hours = staffStats.map(s => s.totalHours);
-    const mean = hours.reduce((a, b) => a + b, 0) / hours.length;
-    const variance = hours.reduce((sum, h) => sum + Math.pow(h - mean, 2), 0) / hours.length;
-    const stdDev = Math.sqrt(variance);
-    const inequalityScore = mean > 0 ? (stdDev / mean) * 100 : 0;
-
-    onResultChange({
-      ...result,
-      shifts: updatedShifts,
-      staffStats,
-      inequalityScore
-    });
+    onShiftsChange(shifts);
 
     toast({
       title: 'Nöbet Güncellendi',
-      description: `${format(updatedShift.date, 'd MMMM', { locale: tr })} nöbeti başarıyla değiştirildi.`
+      description: updatedShift.assignments.length
+        ? `${format(updatedShift.date, 'd MMMM', { locale: tr })} nöbeti değiştirildi.`
+        : `${format(updatedShift.date, 'd MMMM', { locale: tr })} nöbeti kaldırıldı.`
     });
   };
 
@@ -193,18 +149,18 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
 
         <Card className="stat-card">
           <div className="flex items-center gap-3">
-            <div className={cn("p-2 rounded-lg", result.inequalityScore < 15 ? "bg-success/20" : "bg-warning/20")}>
-              {result.inequalityScore < 15 ? (
+            <div className={cn("p-2 rounded-lg", onTarget ? "bg-success/20" : "bg-warning/20")}>
+              {onTarget ? (
                 <CheckCircle className="w-5 h-5 text-success" />
               ) : (
                 <AlertTriangle className="w-5 h-5 text-warning" />
               )}
             </div>
             <div>
-              <p className={cn("text-2xl font-bold", getInequalityColor(result.inequalityScore))}>
-                %{result.inequalityScore.toFixed(1)}
+              <p className={cn("text-2xl font-bold", getDeviationColor(result.targetDeviation))}>
+                %{result.targetDeviation.toFixed(1)}
               </p>
-              <p className="text-xs text-muted-foreground">Eşitsizlik Skoru</p>
+              <p className="text-xs text-muted-foreground">Hedef Saat Sapması</p>
             </div>
           </div>
         </Card>
@@ -235,11 +191,12 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
               const shift = getShiftForDay(date);
               const isWeekend = getDay(date) === 0 || getDay(date) === 6;
               const hasMixed = shift && has24HourAssignment(shift) && has16HourAssignment(shift);
+              const understaffed = (shift?.assignments.filter(a => staff.some(s => s.id === a.staffId)).length ?? 0) < config.minStaffPerShift;
               
               return (
                 <div
                   key={idx}
-                  onClick={() => shift && handleShiftClick(shift)}
+                  onClick={() => handleDayClick(date)}
                   className={cn(
                     "aspect-square p-1 rounded-lg border transition-all group relative",
                     shift ? (
@@ -250,7 +207,8 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
                           : "shift-16 border-accent/30"
                     ) : "bg-card border-border",
                     isWeekend && "bg-muted/30",
-                    shift && "cursor-pointer hover:ring-2 hover:ring-primary/50"
+                    understaffed && "border-destructive/70 border-dashed",
+                    onShiftsChange && "cursor-pointer hover:ring-2 hover:ring-primary/50"
                   )}
                 >
                   <div className="h-full flex flex-col">
@@ -261,26 +219,28 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
                       {format(date, 'd')}
                     </span>
                     {shift && (
-                      <>
-                        <div className="flex-1 flex flex-col justify-center overflow-hidden">
+                      <div className="flex-1 flex flex-col justify-center overflow-hidden">
                           <div className="text-[9px] text-center truncate">
                             {shift.assignments.map(a => {
                               const name = getStaffName(a.staffId).split(' ')[0];
                               return `${name}${a.duration === 16 ? '*' : ''}`;
                             }).join(', ')}
-                          </div>
                         </div>
-                        <div className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <Edit3 className="w-3 h-3 text-primary" />
-                        </div>
-                      </>
+                      </div>
+                    )}
+                    {onShiftsChange && (
+                      <div className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Edit3 className="w-3 h-3 text-primary" />
+                      </div>
                     )}
                   </div>
                 </div>
               );
             })}
           </div>
-          <p className="text-xs text-muted-foreground mt-2">* 16 saatlik nöbeti gösterir</p>
+          <p className="text-xs text-muted-foreground mt-2">
+            * 16 saatlik nöbeti gösterir · Kesikli kırmızı çerçeve: en az {config.minStaffPerShift} nöbetçi yok · Düzenlemek için güne tıklayın
+          </p>
         </CardContent>
       </Card>
 
@@ -295,7 +255,7 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
               <thead>
                 <tr className="border-b border-border">
                   <th className="text-left py-2 px-2">İsim</th>
-                  <th className="text-center py-2 px-2">Toplam Saat</th>
+                  <th className="text-center py-2 px-2">Saat / Hedef</th>
                   <th className="text-center py-2 px-2">Nöbet</th>
                   <th className="text-center py-2 px-2">24s</th>
                   <th className="text-center py-2 px-2">16s</th>
@@ -304,19 +264,13 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
               </thead>
               <tbody>
                 {result.staffStats.map(stat => {
-                  const staffMember = staff.find(s => s.id === stat.staffId);
-                  const targetHours = staffMember?.monthlyHours;
+                  const hitTarget = stat.totalHours === stat.targetHours;
                   return (
                     <tr key={stat.staffId} className="border-b border-border/50">
-                      <td className="py-2 px-2 font-medium">
-                        {stat.name}
-                        {targetHours !== undefined && (
-                          <Badge variant="outline" className="ml-2 text-xs bg-warning/20 text-warning border-warning/50">
-                            Hedef: {targetHours}h
-                          </Badge>
-                        )}
+                      <td className="py-2 px-2 font-medium">{stat.name}</td>
+                      <td className={cn("text-center py-2 px-2 font-mono", hitTarget ? "text-success" : "text-warning")}>
+                        {stat.totalHours} / {stat.targetHours}
                       </td>
-                      <td className="text-center py-2 px-2 font-mono">{stat.totalHours}</td>
                       <td className="text-center py-2 px-2">{stat.shiftCount}</td>
                       <td className="text-center py-2 px-2">{stat.shift24Count}</td>
                       <td className="text-center py-2 px-2">{stat.shift16Count}</td>
@@ -363,8 +317,10 @@ export function ScheduleView({ result, staff, month, year, onResultChange }: Sch
       {/* Shift Edit Dialog */}
       <ShiftEditDialog
         shift={editingShift}
+        shifts={result.shifts}
         staff={staff}
         open={isDialogOpen}
+        workedPreviousDay={workedPreviousDay}
         onOpenChange={setIsDialogOpen}
         onSave={handleShiftSave}
       />

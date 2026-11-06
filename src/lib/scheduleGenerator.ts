@@ -1,314 +1,348 @@
-import { Staff, Shift, ScheduleConfig, ScheduleResult, StaffStats, DateRange, StaffAssignment } from '@/types/schedule';
-import { addDays, isSameDay, isWithinInterval, getDaysInMonth, startOfMonth, format } from 'date-fns';
+import type { ScheduleConfig, ScheduleResult, Shift, Staff, StaffAssignment } from '@/types/schedule';
+import {
+  availableDays,
+  getMonthDays,
+  longShiftCount,
+  notTogetherRelation,
+  planStaff,
+  type MonthContext,
+  type StaffPlan,
+} from './scheduleRules';
+import { evaluateSchedule } from './scheduleStats';
 
-function isDateUnavailable(date: Date, unavailableDates: DateRange[], vacationDays: Date[]): boolean {
-  const inRange = unavailableDates.some(range => 
-    isWithinInterval(date, { start: range.start, end: range.end })
-  );
-  if (inRange) return true;
-  return vacationDays.some(vd => isSameDay(date, vd));
+/*
+ * How generation works
+ *
+ * 1. Hours → shift counts. A target of H hours (a multiple of 8) is hit exactly by any shift count n with
+ *    ceil(H/24) ≤ n ≤ floor(H/16): use (H − 16n)/8 shifts of 24h and the rest 16h. So each person gets a
+ *    window of allowed shift counts (see planStaff), capped by how many shifts their available days allow
+ *    under the post-shift rest rule.
+ * 2. Days. Simulated annealing decides who works which day. Never violated (moves are rejected):
+ *    availability, the rest rule (no two days in a row, including the last day of the previous month via
+ *    `workedPreviousDay`), strict "not together", the per-person maximum shift count. Penalised: being under the minimum shift count, days below minStaffPerShift, missing
+ *    together partners, soft "not together" pairs, and extra people above the minimum.
+ * 3. Durations. Each person's 24h/16h split is fixed by their shift count; which days get the 24h shifts is
+ *    chosen to spread 24h shifts evenly across the month.
+ */
+
+export interface GenerateOptions extends MonthContext {
+  /** Fixed seed for reproducible output. Without it every run gives a different valid schedule. */
+  seed?: number;
 }
 
-function getStaffIdsFromShift(shift: Shift): string[] {
-  return shift.assignments.map(a => a.staffId);
+const WEIGHT = {
+  missingShift: 1000, // per shift a person is below the count their hour target needs
+  missingStaff: 300, // per missing person on a day below minStaffPerShift
+  strictTogether: 60, // per shift where a "%100 Zorunlu" together partner is absent
+  softNotTogether: 8, // per shift shared by a soft "not together" pair
+  softTogether: 3, // per shift where an "Optimize" together partner is absent
+  extraStaff: 1, // × (people above the minimum)² per day: spreads extras evenly, favours fewer/longer shifts
+};
+
+const RESTARTS = 3;
+const START_TEMPERATURE = 30;
+const END_TEMPERATURE = 0.2;
+
+interface Partner {
+  other: number;
+  weight: number;
 }
 
-function getStaffHoursFromShift(staffId: string, shift: Shift): number {
-  const assignment = shift.assignments.find(a => a.staffId === staffId);
-  return assignment ? assignment.duration : 0;
-}
+/** [staff index, day index, should end up working] */
+type Flip = [number, number, boolean];
 
-function calculateStaffHours(staffId: string, shifts: Shift[]): number {
-  return shifts.reduce((total, shift) => total + getStaffHoursFromShift(staffId, shift), 0);
-}
+class Roster {
+  readonly on: Uint8Array;
+  readonly perDay: Int32Array;
+  readonly perStaff: Int32Array;
+  cost: number;
 
-function checkPreferNotTogether(staff1: Staff, staff2: Staff): { preferred: boolean; strict: boolean } {
-  const preferred = staff1.preferNotTogether.includes(staff2.id) || staff2.preferNotTogether.includes(staff1.id);
-  const strict = (staff1.preferNotTogether.includes(staff2.id) && staff1.preferNotTogetherStrict) ||
-                 (staff2.preferNotTogether.includes(staff1.id) && staff2.preferNotTogetherStrict);
-  return { preferred, strict };
-}
-
-function getTargetHours(s: Staff, defaultHours: number): number {
-  return s.monthlyHours ?? defaultHours;
-}
-
-export function generateSchedule(
-  staff: Staff[],
-  config: ScheduleConfig
-): ScheduleResult {
-  const shifts: Shift[] = [];
-  const daysInMonth = getDaysInMonth(new Date(config.year, config.month));
-  const monthStart = startOfMonth(new Date(config.year, config.month));
-  
-  const staffHours: Map<string, number> = new Map();
-  staff.forEach(s => staffHours.set(s.id, 0));
-  
-  const staffTargets: Map<string, number> = new Map();
-  staff.forEach(s => staffTargets.set(s.id, getTargetHours(s, config.totalMonthlyHours)));
-  
-  const canWorkOnDate = (s: Staff, date: Date, workedYesterday: Set<string>): boolean => {
-    if (isDateUnavailable(date, s.unavailableDates, s.vacationDays || [])) return false;
-    if (workedYesterday.has(s.id)) return false;
-    return true;
-  };
-  
-  const canAddHours = (staffId: string, hours: number): boolean => {
-    const current = staffHours.get(staffId) || 0;
-    const target = staffTargets.get(staffId) || config.totalMonthlyHours;
-    return current + hours <= target;
-  };
-  
-  const getRemainingNeeded = (staffId: string): number => {
-    const current = staffHours.get(staffId) || 0;
-    const target = staffTargets.get(staffId) || config.totalMonthlyHours;
-    return Math.max(0, target - current);
-  };
-  
-  let assignedYesterday: Set<string> = new Set();
-
-  // First pass: assign at least `minStaffPerShift` people to each day
-  for (let day = 0; day < daysInMonth; day++) {
-    const currentDate = addDays(monthStart, day);
-
-    const pickDuration = (s: Staff): 16 | 24 | null => {
-      const remaining = getRemainingNeeded(s.id);
-      if (remaining >= 24 && canAddHours(s.id, 24)) return 24;
-      if (remaining >= 16 && canAddHours(s.id, 16)) return 16;
-      return null;
-    };
-
-    const classifyConflict = (
-      candidate: Staff,
-      currentAssignments: StaffAssignment[]
-    ): 'none' | 'soft' | 'strict' => {
-      let hasSoft = false;
-      for (const a of currentAssignments) {
-        const other = staff.find(st => st.id === a.staffId);
-        if (!other) continue;
-        const notTogether = checkPreferNotTogether(candidate, other);
-        if (!notTogether.preferred) continue;
-        if (notTogether.strict) return 'strict';
-        hasSoft = true;
-      }
-      return hasSoft ? 'soft' : 'none';
-    };
-
-    const candidates = staff
-      .filter((s) => canWorkOnDate(s, currentDate, assignedYesterday))
-      .sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-
-    const assignments: StaffAssignment[] = [];
-    const softPool: StaffAssignment[] = [];
-
-    // 1) Prefer no-conflict picks
-    for (const s of candidates) {
-      if (assignments.length >= config.minStaffPerShift) break;
-
-      const duration = pickDuration(s);
-      if (!duration) continue;
-
-      const conflict = classifyConflict(s, assignments);
-      if (conflict === 'strict') continue;
-      if (conflict === 'soft') {
-        softPool.push({ staffId: s.id, duration });
-        continue;
-      }
-
-      assignments.push({ staffId: s.id, duration });
-    }
-
-    // 2) If we still can't hit min staff, allow soft conflicts (but still respect strict)
-    if (assignments.length < config.minStaffPerShift) {
-      for (const a of softPool) {
-        if (assignments.length >= config.minStaffPerShift) break;
-        if (!assignments.some(x => x.staffId === a.staffId)) {
-          assignments.push(a);
-        }
-      }
-    }
-
-    // If day can't be filled, leave it empty (and reset yesterday set)
-    if (assignments.length < config.minStaffPerShift) {
-      assignedYesterday = new Set();
-      continue;
-    }
-
-    shifts.push({ date: currentDate, assignments });
-    assignments.forEach((a) => {
-      staffHours.set(a.staffId, (staffHours.get(a.staffId) || 0) + a.duration);
-    });
-    assignedYesterday = new Set(assignments.map((a) => a.staffId));
+  constructor(
+    readonly staffCount: number,
+    readonly dayCount: number,
+    private readonly minPerDay: number,
+    private readonly available: Uint8Array,
+    readonly plans: StaffPlan[],
+    private readonly strictApart: number[][],
+    private readonly softApart: number[][],
+    /** wants[p]: people p wants on p's shifts */
+    private readonly wants: Partner[][],
+    /** wantedBy[p]: people who want p on their shifts */
+    private readonly wantedBy: Partner[][]
+  ) {
+    this.on = new Uint8Array(staffCount * dayCount);
+    this.perDay = new Int32Array(dayCount);
+    this.perStaff = new Int32Array(staffCount);
+    // Cost of the empty roster; every toggle updates it incrementally.
+    this.cost =
+      WEIGHT.missingStaff * minPerDay * dayCount +
+      plans.reduce((sum, plan) => sum + WEIGHT.missingShift * plan.minShifts, 0);
   }
-  
-  // Second pass: Fill remaining hours with 16-hour shifts
-  // Sort by deficit descending so we prioritize those who need more hours
-  const staffByDeficit = [...staff].sort((a, b) => getRemainingNeeded(b.id) - getRemainingNeeded(a.id));
-  
-  staffByDeficit.forEach(s => {
-    let deficit = getRemainingNeeded(s.id);
-    
-    while (deficit >= 16) {
-      let bestDay: Date | null = null;
-      let bestDayPeopleCount = Infinity;
-      
-      for (let day = 0; day < daysInMonth; day++) {
-        const currentDate = addDays(monthStart, day);
-        
-        if (isDateUnavailable(currentDate, s.unavailableDates, s.vacationDays || [])) continue;
-        
-        const existingShift = shifts.find(shift => isSameDay(shift.date, currentDate));
-        if (!existingShift) continue;
-        
-        const alreadyOnShift = existingShift.assignments.some(a => a.staffId === s.id);
-        if (alreadyOnShift) continue;
-        
-        // Cannot work if worked yesterday (post-shift rest rule)
-        const yesterday = addDays(currentDate, -1);
-        const workedYesterday = shifts.some(shift => 
-          isSameDay(shift.date, yesterday) && shift.assignments.some(a => a.staffId === s.id)
-        );
-        if (workedYesterday) continue;
-        
-        // Cannot work if working tomorrow (because tomorrow would violate post-shift rest)
-        const tomorrow = addDays(currentDate, 1);
-        const hasTomorrowShift = shifts.some(shift => 
-          isSameDay(shift.date, tomorrow) && shift.assignments.some(a => a.staffId === s.id)
-        );
-        if (hasTomorrowShift) continue;
-        
-        // Only check strict conflicts for 16h fills
-        const hasConflict = existingShift.assignments.some(a => {
-          const other = staff.find(st => st.id === a.staffId);
-          if (!other) return false;
-          return checkPreferNotTogether(s, other).strict;
-        });
-        if (hasConflict) continue;
-        
-        if (existingShift.assignments.length < bestDayPeopleCount) {
-          bestDay = currentDate;
-          bestDayPeopleCount = existingShift.assignments.length;
-        }
-      }
-      
-      if (bestDay) {
-        const shiftIndex = shifts.findIndex(shift => isSameDay(shift.date, bestDay!));
-        if (shiftIndex !== -1) {
-          shifts[shiftIndex].assignments.push({ staffId: s.id, duration: 16 });
-          staffHours.set(s.id, (staffHours.get(s.id) || 0) + 16);
-          deficit -= 16;
-        } else {
-          break;
-        }
-      } else {
-        break;
+
+  has(p: number, d: number): boolean {
+    return d >= 0 && d < this.dayCount && this.on[p * this.dayCount + d] === 1;
+  }
+
+  canAdd(p: number, d: number): boolean {
+    const i = p * this.dayCount + d;
+    if (this.on[i] || !this.available[i]) return false;
+    if (this.perStaff[p] >= this.plans[p].maxShifts) return false;
+    if (this.has(p, d - 1) || this.has(p, d + 1)) return false;
+    for (const q of this.strictApart[p]) if (this.on[q * this.dayCount + d]) return false;
+    return true;
+  }
+
+  /** Cost change if (p, d) were toggled. */
+  delta(p: number, d: number): number {
+    const D = this.dayCount;
+    const sign = this.on[p * D + d] ? -1 : 1;
+    const M = this.minPerDay;
+    const before = this.perDay[d];
+    const after = before + sign;
+    let delta =
+      WEIGHT.missingStaff * (Math.max(0, M - after) - Math.max(0, M - before)) +
+      WEIGHT.extraStaff * (Math.max(0, after - M) ** 2 - Math.max(0, before - M) ** 2);
+    const min = this.plans[p].minShifts;
+    const n = this.perStaff[p];
+    delta += WEIGHT.missingShift * (Math.max(0, min - (n + sign)) - Math.max(0, min - n));
+    for (const q of this.softApart[p]) if (this.on[q * D + d]) delta += sign * WEIGHT.softNotTogether;
+    for (const { other, weight } of this.wants[p]) if (!this.on[other * D + d]) delta += sign * weight;
+    for (const { other, weight } of this.wantedBy[p]) if (this.on[other * D + d]) delta -= sign * weight;
+    return delta;
+  }
+
+  toggle(p: number, d: number): void {
+    this.cost += this.delta(p, d);
+    const i = p * this.dayCount + d;
+    const sign = this.on[i] ? -1 : 1;
+    this.on[i] = sign > 0 ? 1 : 0;
+    this.perDay[d] += sign;
+    this.perStaff[p] += sign;
+  }
+
+  /** Applies all flips if each is legal, then keeps them per the Metropolis rule. Returns whether kept. */
+  tryMove(flips: Flip[], temperature: number, rand: () => number): boolean {
+    const start = this.cost;
+    let applied = 0;
+    for (const [p, d, add] of flips) {
+      if (add ? !this.canAdd(p, d) : !this.has(p, d)) break;
+      this.toggle(p, d);
+      applied++;
+    }
+    if (applied === flips.length) {
+      const delta = this.cost - start;
+      if (delta <= 0 || rand() < Math.exp(-delta / temperature)) return true;
+    }
+    for (let i = applied - 1; i >= 0; i--) this.toggle(flips[i][0], flips[i][1]);
+    return false;
+  }
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function generateSchedule(staff: Staff[], config: ScheduleConfig, options: GenerateOptions = {}): ScheduleResult {
+  const days = getMonthDays(config);
+  const S = staff.length;
+  const D = days.length;
+  const minPerDay = Math.max(0, Math.floor(config.minStaffPerShift || 0));
+  const rand = mulberry32(options.seed ?? Math.floor(Math.random() * 2 ** 32));
+  const randInt = (n: number) => Math.floor(rand() * n);
+
+  const context: MonthContext = { workedPreviousDay: options.workedPreviousDay };
+  const plans = staff.map((s) => planStaff(s, config, days, context));
+  const indexById = new Map(staff.map((s, i) => [s.id, i]));
+
+  const available = new Uint8Array(S * D);
+  staff.forEach((s, p) => availableDays(s, days, context).forEach((ok, d) => (available[p * D + d] = ok ? 1 : 0)));
+
+  const strictApart: number[][] = staff.map(() => []);
+  const softApart: number[][] = staff.map(() => []);
+  for (let i = 0; i < S; i++) {
+    for (let j = i + 1; j < S; j++) {
+      const relation = notTogetherRelation(staff[i], staff[j]);
+      const list = relation === 'strict' ? strictApart : relation === 'soft' ? softApart : null;
+      list?.[i].push(j);
+      list?.[j].push(i);
+    }
+  }
+
+  const wants: Partner[][] = staff.map(() => []);
+  const wantedBy: Partner[][] = staff.map(() => []);
+  const strictGroup: Set<number>[] = staff.map(() => new Set());
+  staff.forEach((s, p) => {
+    for (const id of new Set(s.preferTogether ?? [])) {
+      const q = indexById.get(id);
+      if (q === undefined || q === p || strictApart[p].includes(q)) continue;
+      const weight = s.preferTogetherStrict ? WEIGHT.strictTogether : WEIGHT.softTogether;
+      wants[p].push({ other: q, weight });
+      wantedBy[q].push({ other: p, weight });
+      if (s.preferTogetherStrict) {
+        strictGroup[p].add(q);
+        strictGroup[q].add(p);
       }
     }
   });
-  
-  const staffStats = calculateStats(staff, shifts);
-  const inequalityScore = calculateInequalityScore(staffStats, staff, config.totalMonthlyHours);
-  const suggestions = generateSuggestions(staffStats, inequalityScore, staff, config.totalMonthlyHours);
+  const groups = strictGroup.map((g) => [...g]);
 
-  const maxShiftsPerStaff = Math.ceil(daysInMonth / 2);
-  const maxStaffSlots = staff.length * maxShiftsPerStaff;
-  const requiredSlots = daysInMonth * config.minStaffPerShift;
-  if (requiredSlots > maxStaffSlots) {
-    const minStaffNeeded = Math.ceil(requiredSlots / maxShiftsPerStaff);
-    suggestions.unshift(
-      `Uyarı: Mevcut kurallarla (nöbet ertesi boş) ayın tüm günlerini ${config.minStaffPerShift}+ kişiyle doldurmak matematiksel olarak zor/İmkansız olabilir. Bu ay için en az ~${minStaffNeeded} personel gerekir.`
-    );
-  }
+  const newRoster = () =>
+    new Roster(S, D, minPerDay, available, plans, strictApart, softApart, wants, wantedBy);
 
-  return { shifts, staffStats, inequalityScore, suggestions };
-}
+  const workingDay = (r: Roster, p: number): number => {
+    if (!r.perStaff[p]) return -1;
+    const start = randInt(D);
+    for (let k = 0; k < D; k++) {
+      const d = (start + k) % D;
+      if (r.has(p, d)) return d;
+    }
+    return -1;
+  };
 
-function calculateStats(staff: Staff[], shifts: Shift[]): StaffStats[] {
-  return staff.map(s => {
-    const staffShifts = shifts.filter(shift => shift.assignments.some(a => a.staffId === s.id));
-    const totalHours = staffShifts.reduce((sum, shift) => {
-      const assignment = shift.assignments.find(a => a.staffId === s.id);
-      return sum + (assignment?.duration || 0);
-    }, 0);
-    const shift24Count = staffShifts.filter(shift => {
-      const assignment = shift.assignments.find(a => a.staffId === s.id);
-      return assignment?.duration === 24;
-    }).length;
-    const shift16Count = staffShifts.filter(shift => {
-      const assignment = shift.assignments.find(a => a.staffId === s.id);
-      return assignment?.duration === 16;
-    }).length;
-    
-    let preferencesSatisfied = 0;
-    let preferencesTotal = 0;
-    
-    staffShifts.forEach(shift => {
-      const staffIds = shift.assignments.map(a => a.staffId);
-      s.preferTogether.forEach(partnerId => {
-        preferencesTotal++;
-        if (staffIds.includes(partnerId)) {
-          preferencesSatisfied++;
+  /** Greedy start: shift counts from each minimum upwards until days can be covered, least-flexible people first. */
+  const seedRoster = (r: Roster) => {
+    const counts = plans.map((plan) => plan.minShifts);
+    let total = counts.reduce((a, b) => a + b, 0);
+    while (total < D * minPerDay) {
+      let pick = -1;
+      let room = 0;
+      counts.forEach((c, p) => {
+        if (plans[p].maxShifts - c > room) {
+          room = plans[p].maxShifts - c;
+          pick = p;
         }
       });
-    });
-    
-    return {
-      staffId: s.id,
-      name: s.name,
-      totalHours,
-      shiftCount: staffShifts.length,
-      shift24Count,
-      shift16Count,
-      preferencesSatisfied,
-      preferencesTotal
-    };
-  });
-}
-
-function calculateInequalityScore(stats: StaffStats[], staff: Staff[], defaultTargetHours: number): number {
-  if (stats.length === 0) return 0;
-  
-  const deviations = stats.map(s => {
-    const staffMember = staff.find(st => st.id === s.staffId);
-    const target = staffMember?.monthlyHours ?? defaultTargetHours;
-    return Math.abs(s.totalHours - target);
-  });
-  
-  const avgDeviation = deviations.reduce((a, b) => a + b, 0) / deviations.length;
-  const maxDeviation = Math.max(...deviations);
-  
-  return (avgDeviation * 0.5 + maxDeviation * 0.5);
-}
-
-function generateSuggestions(stats: StaffStats[], score: number, staff: Staff[], defaultTargetHours: number): string[] {
-  const suggestions: string[] = [];
-  
-  stats.forEach(s => {
-    const staffMember = staff.find(st => st.id === s.staffId);
-    const target = staffMember?.monthlyHours ?? defaultTargetHours;
-    const diff = Math.abs(s.totalHours - target);
-    
-    if (diff > 24) {
-      if (s.totalHours > target) {
-        suggestions.push(`${s.name} hedef saatinden ${s.totalHours - target} saat fazla çalışıyor.`);
-      } else {
-        suggestions.push(`${s.name} hedef saatine ${target - s.totalHours} saat eksik.`);
+      if (pick < 0) break;
+      counts[pick]++;
+      total++;
+    }
+    const order = staff
+      .map((_, p) => ({ p, slack: plans[p].capacity - counts[p], tie: rand() }))
+      .sort((a, b) => a.slack - b.slack || a.tie - b.tie)
+      .map((o) => o.p);
+    for (const p of order) {
+      for (let k = 0; k < counts[p]; k++) {
+        let best = -1;
+        let bestScore = Infinity;
+        for (let d = 0; d < D; d++) {
+          if (!r.canAdd(p, d)) continue;
+          const score = r.perDay[d] + rand() * 0.5;
+          if (score < bestScore) {
+            bestScore = score;
+            best = d;
+          }
+        }
+        if (best < 0) break;
+        r.toggle(p, best);
       }
     }
+  };
+
+  const anneal = (r: Roster): Uint8Array => {
+    let best = r.on.slice();
+    let bestCost = r.cost;
+    const iterations = Math.min(200_000, 20_000 + S * D * 150);
+    const cooling = END_TEMPERATURE / START_TEMPERATURE;
+    for (let it = 0; it < iterations; it++) {
+      const temperature = START_TEMPERATURE * cooling ** (it / iterations);
+      const roll = rand();
+      const p = randInt(S);
+      let flips: Flip[] | null = null;
+      if (roll < 0.45) {
+        // Move one of p's shifts to another day.
+        const d = workingDay(r, p);
+        const to = randInt(D);
+        if (d >= 0 && to !== d) flips = [[p, d, false], [p, to, true]];
+      } else if (roll < 0.6) {
+        // Extra shift (only within p's allowed shift-count window).
+        flips = [[p, randInt(D), true]];
+      } else if (roll < 0.75) {
+        // Drop a shift (only while p stays at or above their minimum).
+        const d = r.perStaff[p] > plans[p].minShifts ? workingDay(r, p) : -1;
+        if (d >= 0) flips = [[p, d, false]];
+      } else if (roll < 0.93) {
+        // Two people trade a day each.
+        const q = randInt(S);
+        const d = workingDay(r, p);
+        const e = q !== p ? workingDay(r, q) : -1;
+        if (d >= 0 && e >= 0 && d !== e) flips = [[p, d, false], [q, e, false], [p, e, true], [q, d, true]];
+      } else if (groups[p].length) {
+        // Move p together with strict together-partners who share that day.
+        const d = workingDay(r, p);
+        const to = randInt(D);
+        if (d >= 0 && to !== d) {
+          const members = [p, ...groups[p].filter((q) => r.has(q, d) && !r.has(q, to))];
+          flips = [...members.map((m): Flip => [m, d, false]), ...members.map((m): Flip => [m, to, true])];
+        }
+      }
+      if (flips && r.tryMove(flips, temperature, rand) && r.cost < bestCost) {
+        bestCost = r.cost;
+        best = r.on.slice();
+      }
+    }
+    return best;
+  };
+
+  let bestOn: Uint8Array | null = null;
+  let bestCost = Infinity;
+  if (S > 0 && D > 0) {
+    for (let run = 0; run < RESTARTS; run++) {
+      const r = newRoster();
+      seedRoster(r);
+      const on = anneal(r);
+      const final = newRoster();
+      on.forEach((v, i) => v && final.toggle(Math.floor(i / D), i % D));
+      if (final.cost < bestCost) {
+        bestCost = final.cost;
+        bestOn = on;
+      }
+    }
+  }
+
+  // Durations: the 24h/16h split per person is fixed by their shift count; spread the 24h shifts across days.
+  const duration = new Uint8Array(S * D);
+  if (bestOn) {
+    const perDay = new Int32Array(D);
+    const workDays = staff.map((_, p) => {
+      const list: number[] = [];
+      for (let d = 0; d < D; d++) if (bestOn[p * D + d]) list.push(d);
+      list.forEach((d) => perDay[d]++);
+      return list;
+    });
+    const longCount = workDays.map((list, p) => longShiftCount(plans[p].plannedHours, list.length));
+    const hasChoice = (p: number) => longCount[p] > 0 && longCount[p] < workDays[p].length;
+    const longPerDay = new Int32Array(D);
+    const order = staff
+      .map((_, p) => ({ p, key: (hasChoice(p) ? 1 : 0) + rand() * 0.5 }))
+      .sort((a, b) => a.key - b.key)
+      .map((o) => o.p);
+    for (const p of order) {
+      const ranked = workDays[p]
+        .map((d) => ({ d, key: longPerDay[d] * 100 + perDay[d] + rand() }))
+        .sort((a, b) => a.key - b.key);
+      ranked.forEach(({ d }, k) => {
+        const hours = k < longCount[p] ? 24 : 16;
+        duration[p * D + d] = hours;
+        if (hours === 24) longPerDay[d]++;
+      });
+    }
+  }
+
+  const shifts: Shift[] = [];
+  days.forEach((date, d) => {
+    const assignments: StaffAssignment[] = [];
+    staff.forEach((s, p) => {
+      const hours = duration[p * D + d];
+      if (hours) assignments.push({ staffId: s.id, duration: hours as 16 | 24 });
+    });
+    if (assignments.length) shifts.push({ date, assignments });
   });
-  
-  if (score > 20) {
-    suggestions.push("Eşitsizlik skoru yüksek. Bazı kişilerin müsaitlik kısıtlamalarını gevşetmeyi düşünün.");
-  }
-  
-  const lowSatisfaction = stats.filter(s => s.preferencesTotal > 0 && (s.preferencesSatisfied / s.preferencesTotal) < 0.5);
-  if (lowSatisfaction.length > 0) {
-    suggestions.push(`${lowSatisfaction.map(s => s.name).join(', ')} için birlikte çalışma tercihleri düşük oranda karşılandı.`);
-  }
-  
-  if (suggestions.length === 0) {
-    suggestions.push("Dağılım dengeli görünüyor. Hedef saatler tutturuldu!");
-  }
-  
-  return suggestions;
+
+  return { shifts, ...evaluateSchedule(staff, shifts, config, context) };
 }
